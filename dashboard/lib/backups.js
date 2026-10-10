@@ -63,7 +63,9 @@ class Backups {
 
   prune() {
     const keep = Math.max(1, Number(this.getConfig().backupsToKeep) || 10);
-    const autos = this.list().filter(b => /^auto-|^before-/.test(b.label));
+    // Only explicit "auto-" backups are pruned. Safety copies made before a world reset/import/update
+    // (before-reset, before-import, before-<version>) are 'manual' kind and must never be deleted automatically.
+    const autos = this.list().filter(b => b.label.startsWith('auto-'));
     for (const b of autos.slice(keep)) { try { fs.unlinkSync(path.join(this.backupDir, b.name)); } catch { /* ignore */ } }
   }
 
