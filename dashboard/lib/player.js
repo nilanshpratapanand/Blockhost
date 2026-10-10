@@ -112,6 +112,7 @@ function createPlayer(o) {
   function stopPlayit() { const c = P.playit; P.playit = null; if (c) { try { c.kill(); } catch { /* gone */ } log('Tunnel closed.'); } }
 
   // the server jar can ask for a newer Java than the one we fetched first: fetch that too, right before it starts
+  const portFree = port => new Promise(res => { const t = net.createServer(); t.once('error', () => res(false)); t.once('listening', () => t.close(() => res(true))); t.listen(port); });
   const rawStart = mc.start.bind(mc);
   mc.start = async () => {
     const info = mc.jarInfo(); const need = (info && info.java) || DEFAULT_JAVA;
@@ -119,6 +120,10 @@ function createPlayer(o) {
     if (cur < need) {
       P.prep = `Getting Java ${need}...`;
       try { saveConfig({ javaPath: await doEnsureJre(path.join(dir, 'java'), need, { log, progress: () => {} }) }); } finally { P.prep = ''; }
+    }
+    const wantPort = Number(host.port) || Number(props.getAll(path.join(serverDir, 'server.properties'))['server-port']) || 25565;
+    if (!(await (o.portFree || portFree)(wantPort))) {
+      throw Object.assign(new Error(`Port ${wantPort} is already in use on this PC. If your own Blockhost dashboard is open, close it (it keeps this port for Live Sync), then press Start again.`), { code: 'PORT_BUSY' });
     }
     if (host.port) { try { props.setMany(path.join(serverDir, 'server.properties'), { 'server-port': String(host.port) }); } catch (e) { log('Could not set the server port: ' + e.message); } }
     return rawStart();

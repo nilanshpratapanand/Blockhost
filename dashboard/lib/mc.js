@@ -223,10 +223,12 @@ class MinecraftServer extends EventEmitter {
 
   handleExit(code, signal) {
     const wasState = this.state;
-    this.lastFailure = (wasState === 'starting' && !this.userStop && code !== 0) ? this.diagnoseFailure() : null;
+    // a server that exits while still starting did not start - even if Java returns code 0 (26.x does for a bind failure)
+    const failedStart = wasState === 'starting' && !this.userStop;
+    this.lastFailure = failedStart ? this.diagnoseFailure() : null;
     if (this.lastFailure) this.log('Start failed: ' + this.lastFailure.hint, 'error');
     this.proc = null;
-    const clean = this.userStop || code === 0;
+    const clean = this.userStop || (code === 0 && !failedStart);
     this.log(`Server process exited (code ${code ?? signal}).`, clean ? 'dash' : 'error');
     this.players.clear();
     this.onlineCount = 0;

@@ -122,3 +122,25 @@ test('host bundle ships every local module the player needs, and reads the playi
   assert.strictEqual(hb.parseSecret('nothing'), '');
   assert.strictEqual(hb.findPlayitKey('  mykeymykeymykeymykey ', {}).key, 'mykeymykeymykeymykey');
 });
+
+test('a busy port is reported at once instead of hanging in "starting"', { skip: process.platform === 'win32' }, async () => {
+  const net = require('net');
+  const blocker = net.createServer(); await new Promise(r => blocker.listen(0, r)); const busy = blocker.address().port;
+  const secret = 'secretsecretsecret1'; const cloud = fakeCloud(secret); const url = 'https://x.example.workers.dev';
+  const fetchImpl = (u, i) => cloud.f(u, i);
+  const od = tmp('owner2'); fs.mkdirSync(path.join(od, 'world')); fs.writeFileSync(path.join(od, 'world', 'level.dat'), 'L');
+  fs.writeFileSync(path.join(od, 'eula.txt'), 'eula=true\n'); fs.writeFileSync(path.join(od, 'server.properties'), 'level-name=world\n');
+  makeZip(path.join(od, 'server.jar'), { 'version.json': JSON.stringify({ id: '26.3', java_version: 25 }) });
+  let ocfg = {}; const owner = new BatonHost({ mc: { on() {}, isRunning: () => false }, dir: od, getConfig: () => ocfg, saveConfig: p => { ocfg = { ...ocfg, ...p }; }, fetchImpl, worldName: () => 'world', stateFile: path.join(od, 'st.json') });
+  await owner.seed(url, secret);
+  const fd = tmp('friend2'); const javaPath = path.join(fd, 'java'); fs.writeFileSync(javaPath, FAKE_JAVA, { mode: 0o755 });
+  fs.writeFileSync(path.join(fd, 'host.json'), JSON.stringify({ code: encodeCode(url, secret), address: 'a:1', world: 'world', port: busy, name: 'T' }));
+  const p = createPlayer({ dir: fd, fetchImpl, ensureJre: async () => javaPath, installPlayit: async () => {}, noExit: true, config: { batonMinHostGB: 1 } });
+  const ctl = await p.listen();
+  try {
+    await call(ctl, 'POST', '/start');
+    const st = await until(async () => { const s = (await call(ctl, 'GET', '/state')).body; return s.phase === 'error' && s; });
+    assert.match(st.message, /already in use/);
+    assert.strictEqual(cloud.s.expiresAt, 0, 'the baton must be released');
+  } finally { await p.shutdown(); blocker.close(); }
+});
