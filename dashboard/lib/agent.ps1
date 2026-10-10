@@ -12,7 +12,7 @@
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
-$AgentVersion = 1
+$AgentVersion = 2
 $Mode = 'agent'
 if ($env:BH_MODE) { $Mode = $env:BH_MODE } elseif ($args.Count -gt 0) { $Mode = [string]$args[0] }
 $env:BH_MODE = $null
