@@ -47,6 +47,7 @@ const DEFAULT_CONFIG = {
   autoRestart: true,
   autoStartServer: false,
   batonCode: '', batonId: '', batonName: '', batonIdleMin: 30, batonMaxRamGB: 4, batonMinHostGB: 6, batonStandby: false, batonRamBackup: null,
+  dpAutoHeal: true,         // move data packs that Minecraft cannot load out of the way (lib/dpguard.js)
   opGuard: true,            // operators are session-only (see lib/opguard.js)
   opGuardNames: [],
   checkUpdatesOnLaunch: true,
@@ -98,6 +99,9 @@ backups.storage = storage;
 const updater = new Updater(SERVER_DIR, mc, backups, getConfig);
 const rpc = new McRpc();
 const packs = new Packs(SERVER_DIR, DASH_DIR, mc, getConfig, saveConfig);
+const { DpGuard, parseLog: parseDpLog } = require('./lib/dpguard');
+const dpguard = new DpGuard({ serverDir: SERVER_DIR, packDir: () => packs.datapackDir(), log: (m, l) => mc.log(m, l || 'dash') });
+packs.dpguard = dpguard;
 let latestRelease = null;
 let playit = { running: false, path: null };
 let statsHistory = [];
@@ -140,6 +144,9 @@ mc.on('state', s => { if (s.state === 'offline' || s.state === 'crashed') opGuar
 mc.beforeStart = async () => {
   opGuard.scrub();                       // never start with permanent name-based operators
   await packs.processPendingDeletes();   // data packs removed while the server had them open
+  if (config.dpAutoHeal) {               // one data pack Minecraft cannot load stops the whole server - move those aside first
+    try { const m = dpguard.preflight(); if (m.length) mc.log(`Data Pack Guard moved ${m.length} incompatible data pack${m.length > 1 ? 's' : ''} aside so the server can start (see Add-ons > Data packs to restore).`, 'warn'); } catch (e) { mc.log('Data Pack Guard check failed: ' + e.message, 'warn'); }
+  }
   if (config.serverPackAuto && config.serverPackAuto.via === 'fast') {   // the fast-lane address changes per run
     if (!fast.url && fast.wanted) await fast.waitUrl(20000);
     const want = fast.url ? `${fast.url}/rp/${config.serverPackAuto.sha1}.zip` : '';
@@ -324,7 +331,25 @@ setInterval(() => {
   pingCheck().catch(() => {});
 }, 5000);
 
+// If Minecraft still refuses to start because of data packs, read its own error log, move exactly the packs it names, try again.
+let dpPrev = 'offline', dpHeals = 0;
+function dpAfterState(state) {
+  const was = dpPrev; dpPrev = state;
+  if (state === 'online') { dpHeals = 0; return; }
+  if (!config.dpAutoHeal || was !== 'starting' || (state !== 'offline' && state !== 'crashed') || mc.userStop) return;
+  let text = '';
+  try { const f = path.join(SERVER_DIR, 'logs', 'latest.log'); const st = fs.statSync(f); const fd = fs.openSync(f, 'r'); const n = Math.min(st.size, 4 * 1024 * 1024); const b = Buffer.alloc(n); fs.readSync(fd, b, 0, n, st.size - n); fs.closeSync(fd); text = b.toString('utf8'); } catch { return; }
+  const r = dpguard.healFromLog(text);
+  if (!r.blocked) return;
+  if (r.moved.length && dpHeals < 3) {
+    dpHeals++;
+    mc.log(`The server could not load ${r.moved.length} data pack${r.moved.length > 1 ? 's' : ''} (${r.moved.join(', ')}). Moved aside - starting again (try ${dpHeals}/3).`, 'warn');
+    setTimeout(() => { if (!mc.proc) mc.start().catch(e => mc.log('Restart failed: ' + e.message, 'error')); }, 1500);
+  } else if (!r.moved.length) mc.log('Minecraft refused to load the data packs but the log does not say which one. Try moving recently added packs out of world/datapacks.', 'error');
+  else mc.log('Data packs keep breaking the server - stopped retrying. Check Add-ons > Data packs.', 'error');
+}
 function onStateChange(state) {
+  dpAfterState(state);
   if (state === 'online') measureWorld().catch(() => {});
   if (state === 'online' && config.useManagementApi) {
     const p = serverProps();
@@ -829,7 +854,10 @@ const routes = {
   'GET /api/packs/search': ({ query }) => packs.search(query.get('type'), query.get('q'), query.get('any') === '1' ? null : (query.get('version') || packs.gameVersion()), query.get('offset'), query.get('source') || 'modrinth', query.get('loader') === 'any' ? 'any' : 'fabric'),
   'POST /api/packs/lookup': ({ body }) => require('./lib/importer').lookup(String(body.input || '').slice(0, 500), packs.gameVersion(), packs),
   'POST /api/packs/import': ({ body }) => require('./lib/importer').resolve(String(body.text || '').slice(0, 20000), packs.gameVersion(), packs),
-  'GET /api/packs/state': () => ({ gameVersion: packs.gameVersion(), serverPack: packs.serverPack(), datapacks: packs.listDatapacks(), kit: packs.listKit() }),
+  'GET /api/packs/state': () => ({ gameVersion: packs.gameVersion(), serverPack: packs.serverPack(), datapacks: packs.listDatapacks(), quarantined: dpguard.list().quarantined, autoHeal: config.dpAutoHeal !== false, kit: packs.listKit() }),
+  'POST /api/dpguard/move': ({ body }) => { if (mc.isRunning()) throw new Error('Stop the server first - Minecraft has its data packs open while it runs.'); if (!dpguard.move(body.name, 'Moved aside by you', 'user')) throw new Error('Not found'); return { ok: true }; },
+  'POST /api/dpguard/restore': ({ body }) => { if (mc.isRunning()) throw new Error('Stop the server first.'); return dpguard.restore(body.name); },
+  'POST /api/dpguard/keep': ({ body }) => { dpguard.trust(path.basename(String(body.name))); return { ok: true }; },
   'POST /api/packs/server-pack': async ({ body }) => {
     let src = { url: body.url, sha1: body.sha1, name: body.name };
     if (body.id) { const f = await packs.bestFile('resourcepack', body.id, packs.gameVersion(), !!body.any); src = { url: f.url, sha1: f.sha1, name: body.name || f.filename }; }

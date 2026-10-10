@@ -57,4 +57,36 @@ function readJarVersion(jarPath) {
     return v;
   } catch { return null; }
 }
-module.exports = { readZipEntry, readJarVersion };
+/** Opens a zip once and lets you list/read many entries. Returns {names, read(name)->Buffer|null, size(name)} or null. */
+function openZip(file) {
+  let buf;
+  try { buf = fs.readFileSync(file); } catch { return null; }
+  const tailStart = Math.max(0, buf.length - 65557);
+  let eocd = -1;
+  for (let i = buf.length - 22; i >= tailStart; i--) if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+  if (eocd < 0) return null;
+  const count = buf.readUInt16LE(eocd + 10), cdOffset = buf.readUInt32LE(eocd + 16);
+  const entries = new Map();
+  let p = cdOffset;
+  for (let n = 0; n < count && p + 46 <= buf.length && buf.readUInt32LE(p) === 0x02014b50; n++) {
+    const nameLen = buf.readUInt16LE(p + 28), extraLen = buf.readUInt16LE(p + 30), commentLen = buf.readUInt16LE(p + 32);
+    const name = buf.toString('utf8', p + 46, p + 46 + nameLen);
+    entries.set(name, { method: buf.readUInt16LE(p + 10), comp: buf.readUInt32LE(p + 20), size: buf.readUInt32LE(p + 24), off: buf.readUInt32LE(p + 42) });
+    p += 46 + nameLen + extraLen + commentLen;
+  }
+  return {
+    names: [...entries.keys()],
+    size: n => (entries.get(n) || {}).size || 0,
+    read(n) {
+      const e = entries.get(n); if (!e) return null;
+      try {
+        const start = e.off + 30 + buf.readUInt16LE(e.off + 26) + buf.readUInt16LE(e.off + 28);
+        const data = buf.subarray(start, start + e.comp);
+        if (e.method === 0) return data;
+        if (e.method === 8) return zlib.inflateRawSync(data);
+      } catch { /* damaged entry */ }
+      return null;
+    },
+  };
+}
+module.exports = { readZipEntry, readJarVersion, openZip };

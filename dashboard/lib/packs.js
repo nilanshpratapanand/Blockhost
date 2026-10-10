@@ -176,7 +176,8 @@ class Packs {
           const gv = this.gameVersion() || '';
           const old = x.name.match(/mc[\s_\-]?(1\.\d+(?:\.\d+)?)/i);
           if (old && /^2\d\./.test(gv) && !x.name.includes(gv)) warn.push(`Made for Minecraft ${old[1]}, your server is ${gv} - may not work or break things.`);
-          return { ...x, warn };
+          const g = this.dpguard ? this.dpguard.check(x.name) : { level: 'ok', reasons: [] };
+          return { ...x, warn, guard: { level: g.level, reasons: g.reasons, trusted: !!(this.dpguard && this.dpguard.state().trusted.includes(x.name)) } };
         });
     } catch { return []; }
   }
@@ -201,6 +202,13 @@ class Packs {
     const tmp = path.join(tmpDir, `${Date.now()}-${safe}.part`);
     const got = await download(f.url, tmp, pct => progress(null, 10 + Math.round(pct * 0.8)), cf.isCfUrl(f.url) ? { 'x-api-key': this.cfKey() } : null);
     if (f.sha1 && got !== f.sha1) { await fsp.rm(tmp, { force: true }); throw new Error('Checksum mismatch - download corrupted.'); }
+    // would Minecraft 26.x refuse to load it? One bad data pack stops the whole server from starting.
+    const g = this.dpguard ? this.dpguard.checkFile(tmp) : { level: 'ok', reasons: [] };
+    if (g.level !== 'ok') {
+      await fsp.rm(tmp, { force: true });
+      const e = new Error(`${safe} was NOT installed - it ${g.level === 'broken' ? 'cannot load' : 'looks made for an older Minecraft'} on ${this.gameVersion() || 'this server'}: ${g.reasons[0]}. Installing it would stop your server from starting. Look for a version made for ${this.gameVersion() || 'your Minecraft'}.`);
+      e.code = 'DP_BAD'; throw e;
+    }
     try { await moveFile(tmp, dest); } finally { fsp.rm(tmp, { force: true }).catch(() => {}); }
     if (this.mc.state === 'online') { this.mc.send('reload'); progress('Installed and reloaded - active now.', 100); }
     else progress('Installed - active next time the server starts.', 100);

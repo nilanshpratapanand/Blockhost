@@ -38,9 +38,25 @@
             : `<div class="muted small">No pack yet. Choose one below — or use your own zip hosted somewhere with a direct download link (e.g. <a href="https://mc-packs.net" target="_blank" rel="noopener">mc-packs.net</a>, GitHub release, Dropbox).</div>`}</div>`;
         }
         if (tab === 'datapack') {
+          const warnIc = ic('alert').replace('<svg ', '<svg width="12" height="12" style="vertical-align:-2px" ');
+          const row = d => {
+            const g = d.guard || { level: 'ok', reasons: [] }, bad = g.level !== 'ok' && !g.trusted;
+            return `<div class="list-row"><div class="avatar sm" style="color:${bad ? 'var(--rose, #e5606b)' : 'var(--emerald)'}">${ic('box')}</div><div class="grow" style="min-width:0"><b>${esc(d.name)}</b> <span class="sub">${d.size ? fmtBytes(d.size) : 'folder'}${d.pending ? ' · switched off, deleted when the server stops' : ''}</span>
+              ${bad ? `<div class="small" style="color:var(--rose, #e5606b);margin-top:3px;white-space:normal;overflow:visible;text-overflow:clip;line-height:1.35">${warnIc} <b>${g.level === 'broken' ? 'Will stop the server from starting' : 'Probably breaks the server'}</b> - ${esc(g.reasons[0] || '')}</div>` : ''}
+              ${(d.warn || []).map(w => `<div class="small" style="color:var(--gold);margin-top:3px;white-space:normal;overflow:visible;text-overflow:clip">${warnIc} ${esc(w)}</div>`).join('')}</div>
+              ${bad ? `<button class="btn btn-sm" style="flex:none" data-dpmove="${esc(d.name)}" title="Moves it to the datapacks-disabled folder. Nothing is deleted.">Move out</button><button class="btn btn-sm" style="flex:none" data-dpkeep="${esc(d.name)}" title="Trust this pack and stop warning">Keep anyway</button>` : ''}
+              <button class="icon-btn danger" data-rmdp="${esc(d.name)}" title="Remove">${ic('trash')}</button></div>`;
+          };
+          const q = state.quarantined || [];
+          const healOn = state.autoHeal !== false;
           return `<div class="card"><div class="card-h"><h2>Installed data packs</h2><span class="tag">${state.datapacks.length}</span></div>
-            <div class="list">${state.datapacks.length ? state.datapacks.map(d => `<div class="list-row"><div class="avatar sm" style="color:var(--emerald)">${ic('box')}</div><div class="grow"><b>${esc(d.name)}</b> <span class="sub">${d.size ? fmtBytes(d.size) : 'folder'}${d.pending ? ' · switched off, deleted when the server stops' : ''}</span>${(d.warn || []).map(w => `<div class="small" style="color:var(--gold);margin-top:3px">${ic('alert').replace('<svg ', '<svg width="12" height="12" style="vertical-align:-2px" ')} ${esc(w)}</div>`).join('')}</div><button class="icon-btn danger" data-rmdp="${esc(d.name)}" title="Remove">${ic('trash')}</button></div>`).join('')
-              : `<div class="muted small">None yet. ${S.snap.hasJar ? '' : 'Create the server first.'} Data packs are added to the world and switched on with /reload.</div>`}</div></div>`;
+            <div class="list">${state.datapacks.length ? state.datapacks.map(row).join('')
+              : `<div class="muted small">None yet. ${S.snap.hasJar ? '' : 'Create the server first.'} Data packs are added to the world and switched on with /reload.</div>`}</div></div>
+            <div class="card"><div class="card-h"><h2>Data Pack Guard</h2></div>
+              <div class="muted small" style="margin-bottom:10px">One data pack that Minecraft ${esc(state.gameVersion || '26.x')} cannot read stops the <b>whole server</b> from starting. The Guard reads every pack before each start and moves the broken ones aside (never deletes), and if a start still fails it reads Minecraft's error log and moves exactly the packs it names.</div>
+              <label class="row small" style="gap:8px"><span class="switch"><input type="checkbox" id="dpHeal" ${healOn ? 'checked' : ''}><span></span></span>Fix this automatically before each start</label>
+              ${q.length ? `<div class="list" style="margin-top:12px">${q.map(x => `<div class="list-row"><div class="avatar sm" style="color:var(--gold)">${ic('box')}</div><div class="grow"><b>${esc(x.name)}</b> <span class="sub">moved aside${x.source === 'log' ? ' after a failed start' : ''}</span><div class="small muted" style="margin-top:3px">${esc(x.why || '')}</div></div><button class="btn btn-sm" data-dprestore="${esc(x.name)}">Put back</button></div>`).join('')}</div>` : `<div class="muted small" style="margin-top:10px">Nothing has been moved aside.</div>`}
+            </div>`;
         }
         const ck = state.installer;
         const installerCard = `<div class="card installer"><div class="row" style="flex-wrap:nowrap;align-items:flex-start;gap:16px">
@@ -196,6 +212,10 @@
           if (!S.snap.hasJar) return toast('Create the server first.', 'err');
           post('/api/packs/datapack', { id: b.dataset.dp, any }).catch(e => toast(e.message, 'err'));
         });
+        $$('[data-dpmove]', view).forEach(b => b.onclick = async () => { try { await post('/api/dpguard/move', { name: b.dataset.dpmove }); toast('Moved aside - nothing was deleted', 'ok'); loadState(); } catch (e) { toast(e.message, 'err'); } });
+        $$('[data-dpkeep]', view).forEach(b => b.onclick = async () => { try { await post('/api/dpguard/keep', { name: b.dataset.dpkeep }); loadState(); } catch (e) { toast(e.message, 'err'); } });
+        $$('[data-dprestore]', view).forEach(b => b.onclick = async () => { try { await post('/api/dpguard/restore', { name: b.dataset.dprestore }); toast('Put back. If it breaks the server it will be moved aside again.', 'ok'); loadState(); } catch (e) { toast(e.message, 'err'); } });
+        const dh = $('#dpHeal'); if (dh) dh.onchange = async e => { try { await post('/api/config', { config: { dpAutoHeal: e.target.checked } }); } catch (x) { toast(x.message, 'err'); } };
         $$('[data-rmdp]', view).forEach(b => b.onclick = async () => {
           if (!(await confirmBox({ title: 'Remove data pack?', text: `<b>${esc(b.dataset.rmdp)}</b> is removed from the world. Things it added (e.g. custom blocks) may disappear.`, ok: 'Remove', danger: true }))) return;
           try { const r = await api('/api/packs/datapack?name=' + encodeURIComponent(b.dataset.rmdp), { method: 'DELETE' }); toast(r && r.pending ? 'Switched off now. Windows keeps the file locked while the server runs - it is deleted automatically when the server stops.' : 'Removed', 'ok', r && r.pending ? 8000 : 3000); loadState(); } catch (e) { toast(e.message, 'err'); }
