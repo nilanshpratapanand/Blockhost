@@ -37,16 +37,18 @@ function decodeCode(code) {
 
 // ------------------------------------------------------------------ coordinator client
 class Coord {
-  constructor({ url, secret, fetchImpl, retries = 3 }) { this.url = url.replace(/\/+$/, ''); this.secret = secret; this.f = fetchImpl || ((u, i) => fetch(u, i)); this.retries = retries; }
+  constructor({ url, secret, admin, fetchImpl, retries = 3 }) { this.url = url.replace(/\/+$/, ''); this.secret = secret; this.admin = admin || ''; this.f = fetchImpl || ((u, i) => fetch(u, i)); this.retries = retries; }
   async req(method, p, { body, epoch, raw } = {}) {
     let last;
     for (let i = 0; i <= this.retries; i++) {
       try {
         const headers = { authorization: 'Bearer ' + this.secret };
         if (epoch) headers['x-epoch'] = String(epoch);
+        if (this.admin) headers['x-admin'] = this.admin;
         if (body !== undefined && !Buffer.isBuffer(body)) headers['content-type'] = 'application/json';
         const r = await this.f(this.url + p, { method, headers, body: body === undefined ? undefined : (Buffer.isBuffer(body) ? body : JSON.stringify(body)) });
         if (r.status === 401) throw Object.assign(new Error('The group secret was rejected - ask the owner for a fresh group code.'), { fatal: true });
+        if (r.status === 403) { let j = {}; try { j = JSON.parse(await r.text()); } catch { /* not json */ } throw Object.assign(new Error(j.error === 'admin-not-enabled' ? 'Remote control is not switched on in your cloud yet - press "Update cloud".' : 'Remote control was refused - press "Update cloud" to refresh it.'), { fatal: true, admin: j.error || 'admin' }); }
         if (r.status === 409) throw Object.assign(new Error('You no longer hold the host baton.'), { fatal: true, lost: true });
         if (r.status >= 500) throw new Error('Coordinator error ' + r.status);
         if (raw) return r;
@@ -66,6 +68,8 @@ class Coord {
   heartbeat(epoch, info) { return this.lease('heartbeat', { epoch, ...info }); }
   release(epoch) { return this.lease('release', { epoch }); }
   request(name) { return this.lease('request', { name }); }
+  peek(since) { return this.lease('peek', { since }); }                       // owner only
+  command(text, kind) { return this.lease('cmd', { text, kind }); }           // owner only
   getManifest() { return this.req('GET', '/v1/manifest'); }
   putManifest(epoch, m) { return this.req('PUT', '/v1/manifest', { body: Buffer.from(JSON.stringify(m)), epoch }); }
   async hasBlob(sha) { const r = await this.req('HEAD', '/v1/blob/' + sha, { raw: true }).catch(() => ({ status: 0 })); return r.status === 200; }
@@ -101,6 +105,7 @@ class Sync {
   /** opts: {dir, coord, stateFile, log, worldName() } */
   constructor(opts) {
     this.dir = opts.dir; this.coord = opts.coord; this.log = opts.log || (() => {}); this.worldName = opts.worldName || (() => 'world');
+    this.opsGuard = opts.opsGuard || (() => false);       // Op Guard: permanent name-based operators never travel between hosts
     this.stateFile = opts.stateFile || path.join(opts.dir, 'dashboard', 'baton-state.json');
     this.stageDir = path.join(opts.dir, '.baton-stage'); this.trashRoot = path.join(opts.dir, '.baton-trash');
     this.state = { lastVersion: 0, cache: {} };
@@ -140,6 +145,9 @@ class Sync {
       let buf = null;
       if (rel === 'server.properties') {
         buf = Buffer.from(stripProps(fs.readFileSync(abs, 'utf8')) + '\n');
+        ent = { ...hashBuf(buf), mtimeMs: st.mtimeMs };
+      } else if (rel === 'ops.json' && this.opsGuard()) {
+        buf = Buffer.from('[]\n');
         ent = { ...hashBuf(buf), mtimeMs: st.mtimeMs };
       } else if (!ent || ent.size !== st.size || ent.mtimeMs !== st.mtimeMs) {
         try { buf = fs.readFileSync(abs); } catch { continue; }

@@ -205,13 +205,30 @@
     S.snap = snap;
     document.body.className = document.body.className.replace(/\bstate-\w+/g, '').trim() + ' state-' + snap.state;
     const labels = { offline: 'Offline', starting: 'Starting', online: 'Online', stopping: 'Stopping', crashed: 'Crashed' };
-    $('#topState span').textContent = labels[snap.state] || snap.state;
+    $('#topState span').textContent = (labels[snap.state] || snap.state) + (snap.remoteHost ? ' · remote' : '');
+    renderRemoteBar(snap);
     const addr = snap.address;
     $('#topAddress').innerHTML = addr ? `${ic('copy')}${esc(addr)}` : `${ic('link')}Set address`;
     $('#footVersion').textContent = snap.installedVersion || 'none';
     $('#footRpc').textContent = snap.rpc ? 'connected' : (snap.state === 'online' ? 'log mode' : '-');
     $('#brandSub').textContent = snap.state === 'online' ? `${snap.onlineCount ?? snap.players.length}/${snap.maxPlayers} online` : snap.external ? 'running outside' : 'local server';
     renderNav();
+  }
+
+  // A friend's PC hosts the server: say so on every page, and keep the owner in control
+  function renderRemoteBar(snap) {
+    const bar = $('#remoteBar'); if (!bar) return;
+    const r = snap && snap.remoteHost;
+    document.body.classList.toggle('has-remote', !!r);
+    if (!r) { bar.hidden = true; bar.innerHTML = ''; return; }
+    const n = snap.onlineCount ?? snap.players.length;
+    const sub = r.needsUpdate ? 'You can see who is online, but to run commands from here press "Update cloud" once in Cloud Host.'
+      : `${n} online · console, kick, op, ban and Stop all work from here. Commands reach their PC within a few seconds.`;
+    const html = `<div class="rb-ico">${ic('cloud')}</div><div class="rb-text"><b>${esc(r.name)} is hosting from their PC</b><span>${esc(sub)}</span></div>` +
+      (r.needsUpdate ? `<a class="btn btn-primary btn-sm" href="#/cloud">Open Cloud Host</a>` : `<button class="btn btn-ghost btn-sm" id="rbStop">${ic('stop')}Stop &amp; hand back</button>`);
+    if (bar.dataset.h !== html) { bar.dataset.h = html; bar.innerHTML = html; }
+    bar.hidden = false;
+    const b = $('#rbStop', bar); if (b) b.onclick = () => stopServer();
   }
 
   // Save resources: disconnect from the live feed when the tab is hidden for a while (the server then
@@ -351,7 +368,9 @@
   }
   async function stopServer() {
     const n = S.snap.players.length;
-    if (n && !(await confirmBox({ title: 'Stop the server?', text: `${n} player${n > 1 ? 's are' : ' is'} online and will be disconnected.`, ok: 'Stop server', danger: true }))) return;
+    const rh = S.snap.remoteHost;
+    if (rh && !(await confirmBox({ title: `Stop ${rh.name}'s server?`, text: `It saves the world to the cloud and hands the server back${n ? `. ${n} player${n > 1 ? 's are' : ' is'} online and will be disconnected` : ''}.`, ok: 'Stop & hand back', danger: true }))) return;
+    if (!rh && n && !(await confirmBox({ title: 'Stop the server?', text: `${n} player${n > 1 ? 's are' : ' is'} online and will be disconnected.`, ok: 'Stop server', danger: true }))) return;
     post('/api/stop').catch(e => toast(e.message, 'err'));
   }
   function eulaModal() {

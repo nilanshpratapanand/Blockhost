@@ -14,12 +14,23 @@ class BatonHost extends EventEmitter {
   constructor(o) {
     super();
     this.o = o; this.mc = o.mc;
-    this.timing = { heartbeatMs: 45000, syncMs: 5 * 60000, tickMs: 15000, crashMs: 25000, standbyMs: 20000, ...(o.timing || {}) };
+    this.timing = { heartbeatMs: 45000, fastBeatMs: 2500, syncMs: 5 * 60000, tickMs: 15000, crashMs: 25000, standbyMs: 20000, ...(o.timing || {}) };
     this.phase = 'off'; this.message = ''; this.progress = null; this.epoch = 0; this.error = null;
     this.remote = null; this.lastSync = null; this.emptySince = null; this.handing = false;
     this.timers = []; this.coord = null; this.sync = null; this.cfgKey = '';
     this.mc.on('state', st => this.onMcState(st));
+    this.sessionOps = new Set();
+    if (o.hostGuard) { this.mc.on('join', n => this.guardJoin(n)); this.mc.on('leave', n => this.guardLeave(n)); }
   }
+  // ---------------------------------------------------------------- Op Guard on a friend's PC (the dashboard has its own)
+  // Operators are session-only: the owner grants op while the player is online, and it ends when they leave. ops.json never
+  // reaches the cloud with names in it (see Sync), and is emptied on this PC before the server starts and after it stops.
+  guardOn() { return this.cfg().opGuard !== false; }
+  opsFile() { return require('path').join(this.o.dir, 'ops.json'); }
+  opsListed(name) { try { const d = JSON.parse(require('fs').readFileSync(this.opsFile(), 'utf8')); return Array.isArray(d) && d.some(e => String(e.name).toLowerCase() === String(name).toLowerCase()); } catch { return false; } }
+  scrubOps() { if (!this.guardOn()) return; try { require('fs').writeFileSync(this.opsFile(), '[]\n'); } catch { /* no server folder yet */ } }
+  guardJoin(n) { if (this.guardOn() && !this.sessionOps.has(String(n).toLowerCase()) && this.opsListed(n)) { this.log(`Op Guard: ${n} joined holding op without a grant - removing it.`); try { this.mc.sendQuiet(`deop ${n}`); } catch { /* gone */ } } }
+  guardLeave(n) { const k = String(n).toLowerCase(); const had = this.sessionOps.delete(k); if (this.guardOn() && (had || this.opsListed(n))) { try { this.mc.sendQuiet(`deop ${n}`); } catch { /* gone */ } } }
   cfg() { return this.o.getConfig(); }
   log(t) { try { (this.o.log || (() => {}))(t); } catch { /* ignore */ } }
   emitState() { this.emit('state', this.snapshot()); }
@@ -35,11 +46,12 @@ class BatonHost extends EventEmitter {
   ensure() {
     const code = this.cfg().batonCode;
     if (!code) throw new Error('This PC has not joined a Cloud Host group yet.');
-    if (code !== this.cfgKey || !this.coord) {
+    const admin = this.cfg().batonAdmin || '';
+    if (code + '|' + admin !== this.cfgKey || !this.coord) {
       const { url, secret } = decodeCode(code);
-      this.coord = new Coord({ url, secret, fetchImpl: this.o.fetchImpl });
-      this.sync = new Sync({ dir: this.o.dir, coord: this.coord, log: t => this.log(t), worldName: this.o.worldName, stateFile: this.o.stateFile });
-      this.cfgKey = code;
+      this.coord = new Coord({ url, secret, admin, fetchImpl: this.o.fetchImpl });
+      this.sync = new Sync({ dir: this.o.dir, coord: this.coord, log: t => this.log(t), worldName: this.o.worldName, stateFile: this.o.stateFile, opsGuard: () => this.cfg().opGuard !== false });
+      this.cfgKey = code + '|' + admin;
     }
     return this.coord;
   }
@@ -118,7 +130,7 @@ class BatonHost extends EventEmitter {
     const plan = this.ramPlan();
     if (!plan.ok) throw new Error(`This PC has ${plan.totalGB} GB of RAM. Hosting needs at least ${plan.minGB} GB so the game and the server both run well.`);
     const me = this.ident();
-    this.error = null; this.handing = false;
+    this.error = null; this.handing = false; this.teleSent = 0;
     this.set('checking', 'Checking who is hosting...');
     let st;
     try { st = await coord.status(); } catch (e) { this.set('error', e.message, { error: e.message }); throw e; }
@@ -138,6 +150,7 @@ class BatonHost extends EventEmitter {
       if (r.empty) throw new Error('The cloud has no world yet. The owner must press "Upload world" first.');
       this.lastSync = { at: Date.now(), version: r.version, files: r.downloaded, bytes: r.bytes || 0 };
       this.applyRam(plan);
+      this.sessionOps.clear(); this.scrubOps();
       this.set('starting', 'Starting the server...');
       this.startHeartbeat();
       await this.mc.start();
@@ -181,24 +194,49 @@ class BatonHost extends EventEmitter {
     this.set('error', err.message, { error: err.message });
   }
 
+  /** what the owner's dashboard can see while this PC hosts: server state, who is online and the newest console lines */
+  telemetry() {
+    const mc = this.mc;
+    const lines = (mc.lines || []).filter(l => l.id > (this.teleSent || 0)).slice(-80).map(l => ({ id: l.id, t: l.t, text: String(l.text).slice(0, 300), level: l.level }));
+    return { state: mc.state, version: mc.runningVersion || '', startedAt: mc.onlineAt || 0, players: (mc.playerList ? mc.playerList() : []).map(p => p.name), lines };
+  }
+  /** things the owner asked for from his dashboard: console commands, or "save and hand off" */
+  runRemote(c) {
+    try {
+      if (c.kind === 'handoff' || /^\/?stop$/i.test(c.text)) { this.log('The owner asked for the server to stop.'); this.handoff('the owner asked').catch(e => this.log('Hand-off failed: ' + e.message)); return; }
+      if (!this.mc.isRunning()) return;
+      this.log('Owner command: ' + c.text);
+      const m = c.text.match(/^\/?(op|deop)\s+(\S+)/i); if (m) { const k = m[2].toLowerCase(); if (/^op$/i.test(m[1])) this.sessionOps.add(k); else this.sessionOps.delete(k); }
+      this.mc.send(c.text);
+    } catch (e) { this.log('Owner command failed: ' + e.message); }
+  }
   startHeartbeat() {
+    this.stopBeat(); this.beating = true; this.watch = false; const gen = this.beatGen;
     const beat = async () => {
       if (!this.epoch) return;
       const players = this.mc.players ? this.mc.players.size : 0;
       try {
-        const r = await this.coord.heartbeat(this.epoch, { address: this.cfg().serverAddress || '', players, phase: this.phase });
+        const tele = this.telemetry();
+        const r = await this.coord.heartbeat(this.epoch, { address: this.cfg().serverAddress || '', players, phase: this.phase, tele });
         this.beatFails = 0;
         if (!r.ok && r.reason === 'lost') return this.onLost();
+        if (tele.lines.length) this.teleSent = tele.lines[tele.lines.length - 1].id;
+        this.watch = !!r.watch;
+        for (const c of (r.cmds || [])) this.runRemote(c);
       } catch (e) { this.beatFails = (this.beatFails || 0) + 1; if (e.lost) return this.onLost(); this.log('Heartbeat failed: ' + e.message); }
     };
-    this.timers.push(setInterval(beat, this.timing.heartbeatMs));
-    beat();
+    const loop = async () => {
+      await beat();
+      if (this.beating && gen === this.beatGen) this.beatT = setTimeout(loop, this.watch ? this.timing.fastBeatMs : this.timing.heartbeatMs);   // fast only while the owner's dashboard is open
+    };
+    loop();
   }
+  stopBeat() { this.beating = false; this.beatGen = (this.beatGen || 0) + 1; clearTimeout(this.beatT); this.beatT = null; }
   startLoops() {
     this.timers.push(setInterval(() => this.syncTick().catch(e => this.log('Sync failed: ' + e.message)), this.timing.syncMs));
     this.timers.push(setInterval(() => this.idleTick().catch(() => {}), this.timing.tickMs));
   }
-  clearTimers() { for (const t of this.timers) clearInterval(t); this.timers = []; }
+  clearTimers() { this.stopBeat(); for (const t of this.timers) clearInterval(t); this.timers = []; }
 
   async onLost() {
     if (this.handing || !this.epoch) return;
@@ -258,6 +296,7 @@ class BatonHost extends EventEmitter {
     try {
       this.set('saving', 'Saving the world...');
       if (this.mc.isRunning()) await this.mc.stop(120000);
+      this.sessionOps.clear(); this.scrubOps();
       this.startHeartbeat();                      // stay "alive" in the cloud while the upload runs
       let lastErr;
       for (let i = 0; i < 3; i++) {

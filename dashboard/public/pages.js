@@ -51,7 +51,7 @@
       const drawHero = () => {
         const s = S.snap;
         const lbl = { offline: 'Start', crashed: 'Start', starting: 'Starting', online: 'Online', stopping: 'Stopping' }[s.state];
-        const sub = s.state === 'online' ? `Up ${fmtDur(Date.now() - s.onlineAt)} · click to stop` : s.state === 'starting' ? 'Loading the world...' : s.state === 'stopping' ? 'Saving & shutting down...' : 'Click to start the server';
+        const sub = s.state === 'online' ? `Up ${fmtDur(Date.now() - s.onlineAt)} · click to stop${s.remoteHost ? ' and hand back' : ''}` : s.state === 'starting' ? 'Loading the world...' : s.state === 'stopping' ? 'Saving & shutting down...' : 'Click to start the server';
         $('#ovHero').innerHTML = `
           <div style="min-width:0;position:relative">
             <div class="server-id">
@@ -75,7 +75,7 @@
             <button class="power" id="powerBtn" ${['starting', 'stopping'].includes(s.state) ? 'disabled' : ''} aria-label="${lbl}">${ic(s.state === 'online' ? 'power' : ['starting', 'stopping'].includes(s.state) ? 'clock' : 'play')}</button>
             <div class="power-label">${lbl}</div>
             <div class="power-sub" id="powerSub">${sub}</div>
-            ${running() ? `<div class="power-extra"><button class="btn btn-ghost btn-sm" id="rsBtn">${ic('restart')}Restart</button><button class="btn btn-ghost btn-sm" id="killBtn" title="Force stop (may lose unsaved progress)">${ic('skull')}Kill</button></div>` : ''}
+            ${running() && !s.remoteHost ? `<div class="power-extra"><button class="btn btn-ghost btn-sm" id="rsBtn">${ic('restart')}Restart</button><button class="btn btn-ghost btn-sm" id="killBtn" title="Force stop (may lose unsaved progress)">${ic('skull')}Kill</button></div>` : ''}
           </div>`;
         $('#powerBtn').onclick = () => (s.state === 'online' ? stopServer() : startServer());
         const cp = $('#cpAddr'); if (cp) cp.onclick = () => copyText(s.address);
@@ -161,7 +161,7 @@
 
       drawBanners(); drawHero(); drawStats(); drawQA(); drawCon();
       api('/api/config').then(r => { S.cfgMaxRam = r.config.maxRam; }).catch(() => {});
-      const tick = setInterval(() => { const ps = $('#powerSub'); if (ps && online()) ps.textContent = `Up ${fmtDur(Date.now() - S.snap.onlineAt)} · click to stop`; }, 1000);
+      const tick = setInterval(() => { const ps = $('#powerSub'); if (ps && online()) ps.textContent = `Up ${fmtDur(Date.now() - S.snap.onlineAt)} · click to stop${S.snap.remoteHost ? ' and hand back' : ''}`; }, 1000);
       on(kind => {
         if (kind === 'state' || kind === 'taskdone') { drawBanners(); drawHero(); drawQA(); drawStats(); }
         else if (kind === 'players') drawStats();

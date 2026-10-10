@@ -24,6 +24,7 @@ Copy this repo's `dashboard/` folder and `Start_Dashboard.bat` into your Minecra
   is synced through a free Cloudflare Worker, and the host hands off after the server has been idle (default 30 min).
   RAM is sized to the host PC, capped at 4 GB. Setup: `dashboard/cloud/README.md`.
 - **Friends host from the tray app**: the owner downloads a friend app from the Cloud Host page. After running it once, a friend's tray icon asks "Start the server for everyone?" when they open Minecraft and nobody is hosting. Their PC downloads its own Java and Node, pulls the world, and runs the server on the owner's one fixed address. The dashboard stays owner-only.
+- **Remote control while a friend hosts**: the friend's PC reports its state and console to your Cloudflare coordinator, and your dashboard mirrors it (online players, live console, commands, op/kick/ban, Stop & hand back). It uses a second, owner-only secret (`ADMIN_SECRET`, deployed once with Cloud Host > "Update cloud") that friends never receive. The friend's PC reports fast only while your dashboard is open. Operators stay session-only on a friend's PC too (Op Guard travels with the host).
 - **Mod Guard**: reads installed mods, flags missing dependencies and client/server mismatches.
 - **Smart storage cleanup** for backups, and auto dependency install for mods.
 

@@ -86,3 +86,21 @@ test('setup: a 200 page that is not the coordinator is not accepted', async () =
   const f = fakeRun();
   await assert.rejects(setup({ cloudDir: '/x', run: f.run, sleep: noSleep, fetch: async () => ({ status: 200, json: async () => ({}) }) }), e => e.code === 'WAIT');
 });
+
+test('setup: redeploy keeps the group secret and ships the owner-only admin secret', async () => {
+  const f = fakeRun();
+  const r = await setup({ cloudDir: '/x', run: f.run, fetch: okFetch, sleep: noSleep, secret: 'existing-group-secret-123', adminSecret: 'admin-secret-abcdef' });
+  const dep = f.calls.find(c => c.a[0] === 'deploy');
+  assert.strictEqual(r.secret, 'existing-group-secret-123');
+  assert.deepStrictEqual(dep.secretFile, { GROUP_SECRET: 'existing-group-secret-123', ADMIN_SECRET: 'admin-secret-abcdef' });
+});
+test('setup: with an admin secret, "ready" waits until the owner-only door answers', async () => {
+  const f = fakeRun(); let adminTries = 0;
+  const fetchImpl = async (u, i) => {
+    const body = JSON.parse(i.body);
+    if (body.op === 'peek') { adminTries++; return { status: adminTries < 4 ? 403 : 200, json: async () => ({ state: 'free' }) }; }
+    return { status: 200, json: async () => ({ state: 'free' }) };
+  };
+  await setup({ cloudDir: '/x', run: f.run, fetch: fetchImpl, sleep: noSleep, secret: 'existing-group-secret-123', adminSecret: 'admin-secret-abcdef' });
+  assert.ok(adminTries >= 6, 'kept probing until three answers in a row succeeded (' + adminTries + ')');
+});

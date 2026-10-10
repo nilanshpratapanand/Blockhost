@@ -593,3 +593,14 @@ details.card[open] > summary::before { transform: rotate(90deg); }
 
 /* safety net: an icon dropped straight into a line of small/muted text must never blow up to full width */
 .muted > svg:not([width]), .dim > svg:not([width]), .small > svg:not([width]) { width: 14px; height: 14px; vertical-align: -2px; }
+
+/* a friend is hosting: keep the owner informed and in control */
+.remote-bar { display: flex; align-items: center; gap: 14px; margin: 14px 32px 0; padding: 12px 16px; border-radius: 14px; border: 1px solid rgba(92,212,234,.35);
+  background: linear-gradient(90deg, rgba(92,212,234,.16), rgba(139,108,255,.07)); }
+.remote-bar[hidden] { display: none; }
+.remote-bar .rb-ico { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; background: rgba(255,255,255,.08); flex: none; }
+.remote-bar .rb-ico svg { width: 18px; height: 18px; }
+.remote-bar .rb-text { flex: 1; min-width: 0; }
+.remote-bar .rb-text > b { display: block; font-size: 14px; }
+.remote-bar .rb-text > span { color: var(--muted); font-size: 12.5px; }
+@media (max-width: 760px) { .remote-bar { margin: 12px 16px 0; flex-wrap: wrap; } }

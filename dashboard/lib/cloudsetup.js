@@ -59,7 +59,7 @@ function explain(text) {
 const fail = (info, raw) => Object.assign(new Error(info.message), { code: info.code, raw });
 
 /**
- * opts: { cloudDir, log(msg,pct), accountId?, run? (injectable for tests), sleep? }
+ * opts: { cloudDir, log(msg,pct), accountId?, run? (injectable for tests), sleep?, secret? (redeploy with the existing group secret), adminSecret? (owner-only remote control) }
  * Resolves { url, secret, account }.
  */
 async function setup(opts) {
@@ -90,9 +90,9 @@ async function setup(opts) {
   }
   const env = account ? { CLOUDFLARE_ACCOUNT_ID: account } : {};
 
-  const secret = crypto.randomBytes(24).toString('base64url');
+  const secret = opts.secret || crypto.randomBytes(24).toString('base64url');
   const sf = path.join(os.tmpdir(), `bh-secret-${crypto.randomBytes(6).toString('hex')}.json`);
-  fs.writeFileSync(sf, JSON.stringify({ GROUP_SECRET: secret }), { mode: 0o600 });
+  fs.writeFileSync(sf, JSON.stringify({ GROUP_SECRET: secret, ...(opts.adminSecret ? { ADMIN_SECRET: opts.adminSecret } : {}) }), { mode: 0o600 });
   let dep;
   try {
     log('Deploying your private coordinator to Cloudflare (free plan)...', 45);
@@ -108,7 +108,15 @@ async function setup(opts) {
   const probe = async () => {
     try {
       const r = await f(`${url}/v1/lease`, { method: 'POST', headers: { authorization: 'Bearer ' + secret, 'content-type': 'application/json' }, body: JSON.stringify({ op: 'status' }) });
-      if (r.status === 200) { const j = await r.json().catch(() => null); return j && j.state ? 'ok' : 'HTTP 200 but not the coordinator'; }
+      if (r.status === 200) {
+        const j = await r.json().catch(() => null);
+        if (!(j && j.state)) return 'HTTP 200 but not the coordinator';
+        if (opts.adminSecret) {                                   // the owner-only door must be open too, or "ready" would be a lie
+          const a = await f(`${url}/v1/lease`, { method: 'POST', headers: { authorization: 'Bearer ' + secret, 'x-admin': opts.adminSecret, 'content-type': 'application/json' }, body: JSON.stringify({ op: 'peek' }) });
+          if (a.status !== 200) return 'remote control not live yet (HTTP ' + a.status + ')';
+        }
+        return 'ok';
+      }
       return 'HTTP ' + r.status;
     } catch (e) { return e.message; }
   };

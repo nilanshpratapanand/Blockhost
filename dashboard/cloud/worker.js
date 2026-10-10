@@ -1,6 +1,7 @@
 // Blockhost Baton coordinator - runs free on Cloudflare Workers (Durable Object + R2).
 // One host at a time (lease with fencing epoch); the world lives in R2 as content-addressed blobs + a manifest.
 const TTL_MS = 150000;          // a host that misses ~3 heartbeats loses the baton
+const WATCH_MS = 25000;         // the owner's dashboard counts as "watching" this long after its last peek
 const MAX_BLOB = 95 * 1024 * 1024;   // Workers Free request bodies are capped at 100 MB
 
 const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
@@ -33,7 +34,7 @@ export class Lease {
         if (live && s.host.id !== b.id) return json({ ok: false, reason: 'busy', ...this.view(s, now) });
         s.epoch += 1;
         s.host = { id: String(b.id).slice(0, 64), name: String(b.name || 'Host').slice(0, 40), ramGB: Number(b.ramGB) || 0, address: '', players: 0, since: now };
-        s.expiresAt = now + this.ttl; s.wanted = null;
+        s.expiresAt = now + this.ttl; s.wanted = null; s.tele = null; s.cmds = [];
         await save();
         return json({ ok: true, epoch: s.epoch, ttlMs: this.ttl });
       }
@@ -43,12 +44,45 @@ export class Lease {
         s.host.players = Math.max(0, Number(b.players) || 0);
         s.host.phase = String(b.phase || '').slice(0, 20);
         s.expiresAt = now + this.ttl;
+        if (b.tele && typeof b.tele === 'object') {
+          // what the owner's dashboard shows while a friend hosts: state, who is online, and the last console lines
+          const t = s.tele || (s.tele = { lines: [], lastId: 0 });
+          t.state = String(b.tele.state || '').slice(0, 20); t.version = String(b.tele.version || '').slice(0, 40);
+          t.startedAt = Number(b.tele.startedAt) || 0; t.at = now;
+          t.players = (Array.isArray(b.tele.players) ? b.tele.players : []).slice(0, 100).map(n => String(n).slice(0, 40));
+          for (const l of (Array.isArray(b.tele.lines) ? b.tele.lines : []).slice(0, 120)) {
+            if (!l || !(l.id > t.lastId)) continue;
+            t.lines.push({ id: l.id, t: Number(l.t) || now, text: String(l.text || '').slice(0, 300), level: String(l.level || 'info').slice(0, 8) });
+            t.lastId = l.id;
+          }
+          if (t.lines.length > 200) t.lines.splice(0, t.lines.length - 200);
+        }
+        const cmds = (s.cmds || []).filter(c => now - c.at < 120000); s.cmds = [];
         await save();
-        return json({ ok: true, wanted: !!s.wanted });
+        return json({ ok: true, wanted: !!s.wanted, watch: !!s.watchAt && now - s.watchAt < WATCH_MS, cmds });
+      }
+      case 'peek': {                                    // admin only (checked in the Worker): look at the running server
+        s.watchAt = now; await save();
+        const v = this.view(s, now);
+        if (!live || !s.tele) return json({ ...v, tele: null });
+        const since = Number(b.since) || 0;
+        const t = s.tele;
+        return json({ ...v, tele: { state: t.state, version: t.version, startedAt: t.startedAt, at: t.at, players: t.players, lastId: t.lastId, lines: t.lines.filter(l => l.id > since) } });
+      }
+      case 'cmd': {                                     // admin only: queue a console command or a hand-off for the host to run
+        if (!live) return json({ ok: false, reason: 'nobody' });
+        const kind = b.kind === 'handoff' ? 'handoff' : 'cmd';
+        const text = String(b.text || '').replace(/[\r\n]/g, ' ').trim().slice(0, 256);
+        if (kind === 'cmd' && !text) return json({ ok: false, reason: 'empty' });
+        s.cmds = (s.cmds || []).filter(c => now - c.at < 120000).slice(-24);
+        s.cmdSeq = (s.cmdSeq || 0) + 1;
+        s.cmds.push({ id: s.cmdSeq, kind, text, at: now });
+        s.watchAt = now; await save();
+        return json({ ok: true, id: s.cmdSeq });
       }
       case 'release': {
         if (b.epoch !== s.epoch) return json({ ok: false, reason: 'lost' });
-        s.expiresAt = 0; await save();
+        s.expiresAt = 0; s.tele = null; s.cmds = []; await save();
         return json({ ok: true });
       }
       case 'check': return json({ ok: b.epoch === s.epoch && !!s.host && s.expiresAt > now - this.ttl });  // allow a short grace for slow uploads
@@ -160,7 +194,13 @@ export default {
 
     if (p === '/v1/lease' && req.method === 'POST') {
       const b = await req.json().catch(() => ({}));
-      if (!['status', 'acquire', 'heartbeat', 'release', 'request'].includes(b.op)) return json({ error: 'bad op' }, 400);
+      if (!['status', 'acquire', 'heartbeat', 'release', 'request', 'peek', 'cmd'].includes(b.op)) return json({ error: 'bad op' }, 400);
+      if (b.op === 'peek' || b.op === 'cmd') {
+        // owner-only: friends hold the group secret, so watching and commanding needs a second secret that never leaves the owner's PC
+        const admin = String(env.ADMIN_SECRET || '');
+        if (!admin) return json({ error: 'admin-not-enabled' }, 403);
+        if (!safeEq(req.headers.get('x-admin') || '', admin)) return json({ error: 'admin' }, 403);
+      }
       return json(await lease(b));
     }
 

@@ -56,7 +56,7 @@ function createPlayer(o) {
   const mc = new MinecraftServer(serverDir, getConfig);
   mc.on('line', l => { if (l.level !== 'info' || /Done \(|joined|left the game|Stopping|ERROR|Exception/i.test(l.text)) log('mc: ' + l.text.slice(0, 300)); });
   const worldName = () => host.world || props.getAll(path.join(serverDir, 'server.properties'))['level-name'] || 'world';
-  const baton = new BatonHost({ mc, dir: serverDir, getConfig, saveConfig, log, fetchImpl: o.fetchImpl, worldName, stateFile: path.join(dataDir, 'baton-state.json'), timing: o.timing, idleMsOverride: o.idleMsOverride });
+  const baton = new BatonHost({ mc, dir: serverDir, getConfig, saveConfig, log, fetchImpl: o.fetchImpl, worldName, stateFile: path.join(dataDir, 'baton-state.json'), timing: o.timing, idleMsOverride: o.idleMsOverride, hostGuard: true });
 
   const P = { prep: '', prepPct: 0, playit: null, playitErr: '', lastActive: Date.now(), quitting: false };
   const doEnsureJre = o.ensureJre || ensureJre;

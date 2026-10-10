@@ -47,7 +47,7 @@ const DEFAULT_CONFIG = {
   javaPath: '',
   autoRestart: true,
   autoStartServer: false,
-  batonCode: '', batonId: '', batonName: '', batonIdleMin: 30, batonMaxRamGB: 4, batonMinHostGB: 6, batonStandby: false, batonRamBackup: null,
+  batonCode: '', batonAdmin: '', batonId: '', batonName: '', batonIdleMin: 30, batonMaxRamGB: 4, batonMinHostGB: 6, batonStandby: false, batonRamBackup: null,
   dpAutoHeal: true,         // move data packs that Minecraft cannot load out of the way (lib/dpguard.js)
   opGuard: true,            // operators are session-only (see lib/opguard.js)
   opGuardNames: [],
@@ -263,6 +263,15 @@ const baton = new BatonHost({
 });
 baton.on('state', s => broadcast('baton', s));
 
+// Remote control: while a friend's PC hosts, mirror its state and console here and forward commands to it (lib/remote.js)
+const { RemoteWatch } = require('./lib/remote');
+const remote = new RemoteWatch({ baton, mc, watched: () => clients.size > 0 });
+remote.on('update', v => {
+  broadcast('state', snapshot()); broadcast('remote', v);
+  const o = snapshot(); broadcast('players', { players: o.players, count: o.onlineCount });
+});
+const REMOTE_OFF = 'This works while the server runs on this PC. A friend is hosting right now - use Stop to save and hand the server back.';
+
 function perfCtx() {
   const info = mc.jarInfo(); const need = (info && info.java) || 21;
   const { best } = findJava(need, config.javaPath);
@@ -397,6 +406,16 @@ setInterval(() => {
 
 // ------------------------------------------------------------------ snapshot
 function snapshot() {
+  const base = snapshotLocal();
+  const r = remote.view();
+  if (!r.on) return base;
+  return {                                    // a friend hosts: show their server as if it ran here
+    ...base, state: r.state, pid: null, version: r.version || base.version, players: r.players.map(name => ({ name, joinedAt: null })),
+    onlineCount: r.count, lastFailure: null, startedAt: r.host.since || null, onlineAt: r.startedAt || r.host.since || base.onlineAt, address: base.address || r.host.address,
+    remoteHost: { name: r.host.name, address: r.host.address, since: r.host.since, control: r.control, needsUpdate: r.needsUpdate },
+  };
+}
+function snapshotLocal() {
   const info = mc.jarInfo();
   const p = serverProps();
   return {
@@ -459,11 +478,19 @@ async function listAction(list, action, name, reason) {
   name = String(name || '').trim();
   if (!name) throw new Error('Name required');
   if (!/^[\w.\-<>:]{1,40}$/.test(name)) throw new Error('Invalid name/IP');
-  if (list === 'ops' && action === 'add') opGuard.grant(name, mc.isRunning() && mc.state === 'online' && mc.players.has(name));
+  if (list === 'ops' && action === 'add') opGuard.grant(name, remote.active ? remote.view().players.includes(name) : (mc.isRunning() && mc.state === 'online' && mc.players.has(name)));
   const file = path.join(SERVER_DIR, LIST_FILES[list]);
   const keyField = list === 'ipbans' ? 'ip' : 'name';
   const inFile = () => U.readJSONFile(file, []).some(e => String(e[keyField]).toLowerCase() === name.toLowerCase());
-  if (mc.isRunning() && mc.state === 'online') {
+  if (remote.active) {
+    // the server runs on a friend's PC: ask it to do this, and keep this PC's copy of the list in step (the cloud copy wins at the next pull)
+    const cmds = {
+      ops: { add: `op ${name}`, remove: `deop ${name}` }, whitelist: { add: `whitelist add ${name}`, remove: `whitelist remove ${name}` },
+      bans: { add: `ban ${name}${reason ? ' ' + reason : ''}`, remove: `pardon ${name}` }, ipbans: { add: `ban-ip ${name}${reason ? ' ' + reason : ''}`, remove: `pardon-ip ${name}` },
+    };
+    if (/^[\w.\-:]+$/.test(name)) await remote.command(cmds[list][action]);
+    if (list === 'ops') return;                // operators are never written to files (Op Guard)
+  } else if (mc.isRunning() && mc.state === 'online') {
     // 1) management API (works by UUID, so it also removes names the console can't resolve, e.g. "<nilansh>"
     //    or players whose name cache expired), 2) console command, 3) last resort: edit the file.
     const entry = U.readJSONFile(file, []).find(e => String(e[keyField]).toLowerCase() === name.toLowerCase());
@@ -679,6 +706,7 @@ const routes = {
   'GET /api/stats/history': () => ({ history: statsHistory }),
 
   'POST /api/start': async () => {
+    if (remote.active) return { ok: false, code: 'CLOUD', error: `${remote.host.name} is hosting right now. You are watching and controlling it from here. To host from this PC instead, press Stop (it saves the world), then start it again.` };
     const blocked = baton.blocksStart(); if (blocked) return { ok: false, code: 'CLOUD', error: blocked };
     if (!mc.isRunning()) {
       const port = sharedActive() && front.listening() ? internalPort() : publicPort();
@@ -692,7 +720,7 @@ const routes = {
     catch (e) { if (e.code) return { ok: false, code: e.code, need: e.need, error: e.message }; throw e; }
     return { ok: true };
   },
-  'POST /api/stop': () => { mc.stop(); return { ok: true }; },
+  'POST /api/stop': async () => { if (remote.active) { await remote.handoff(); return { ok: true, remote: true }; } mc.stop(); return { ok: true }; },
   'POST /api/external/stop': async () => {
     const port = Number(serverProps()['server-port']) || 25565;
     const how = await stopExternal(port);
@@ -701,9 +729,9 @@ const routes = {
     if (await portInUse(port)) throw new Error('The other server is still running. Close its window manually (type stop in it).');
     return { ok: true, how };
   },
-  'POST /api/restart': () => { const blocked = baton.blocksStart(); if (blocked && !mc.isRunning()) return { ok: false, code: 'CLOUD', error: blocked }; mc.restart(); return { ok: true }; },
-  'POST /api/kill': () => { mc.kill(); return { ok: true }; },
-  'POST /api/command': ({ body }) => { mc.send(body.command); return { ok: true }; },
+  'POST /api/restart': () => { if (remote.active) throw new Error(REMOTE_OFF); const blocked = baton.blocksStart(); if (blocked && !mc.isRunning()) return { ok: false, code: 'CLOUD', error: blocked }; mc.restart(); return { ok: true }; },
+  'POST /api/kill': () => { if (remote.active) throw new Error(REMOTE_OFF); mc.kill(); return { ok: true }; },
+  'POST /api/command': async ({ body }) => { if (remote.active) { await remote.command(body.command); return { ok: true, remote: true }; } mc.send(body.command); return { ok: true }; },
   'POST /api/eula': () => {
     fs.writeFileSync(path.join(SERVER_DIR, 'eula.txt'), `#Accepted via Blockhost dashboard (https://aka.ms/MinecraftEULA)\n#${new Date().toString()}\neula=true\n`);
     return { ok: true };
@@ -723,7 +751,7 @@ const routes = {
   'GET /api/lists': () => readLists(),
   'POST /api/lists': async ({ body }) => { if (!LIST_FILES[body.list]) throw new Error('Bad list'); await listAction(body.list, body.action, body.name, body.reason); return readLists(); },
 
-  'GET /api/players/inspect': ({ query }) => mc.inspect(String(query.get('name') || '')),
+  'GET /api/players/inspect': ({ query }) => { if (remote.active) throw new Error('Live player stats need the server to run on this PC.'); return mc.inspect(String(query.get('name') || '')); },
 
   // game rules
   'GET /api/gamerules': () => getGamerules(),
@@ -765,6 +793,20 @@ const routes = {
     try { const r = await baton.seed(String(body.url || '').trim(), String(body.secret || '').trim()); return { ok: true, version: r.version, files: r.uploaded }; }
     finally { baton.off('state', onState); }
   }),
+  'GET /api/remote': () => ({ ...remote.view(), enabled: !!config.batonAdmin, cloud: !!config.batonCode }),
+  // redeploy the coordinator with the same group secret plus the owner-only remote-control secret
+  'POST /api/baton/update-cloud': () => {
+    if (!config.batonCode) throw new Error('Set up Cloud Host first.');
+    return runTask('Update cloud (remote control)', async p => {
+      const { setup } = require('./lib/cloudsetup'); const { decodeCode } = require('./lib/baton');
+      const cur = decodeCode(config.batonCode);
+      const admin = config.batonAdmin || require('crypto').randomBytes(24).toString('base64url');
+      const r = await setup({ cloudDir: path.join(DASH_DIR, 'cloud'), log: p, secret: cur.secret, adminSecret: admin });
+      if (r.url.replace(/\/+$/, '') !== cur.url.replace(/\/+$/, '')) throw new Error(`Cloudflare put the update at a different address (${r.url}) than your group (${cur.url}). Nothing was changed on this PC.`);
+      saveConfig({ batonAdmin: admin }); baton.cfgKey = ''; remote.adminOk = null; remote.nudge();
+      return { ok: true, url: r.url };
+    });
+  },
   'POST /api/baton/start': async () => {
     const p = baton.startHosting(); p.catch(() => {});
     const early = await Promise.race([p.then(() => null, e => e), U.sleep(1500).then(() => null)]);
@@ -853,7 +895,7 @@ const routes = {
   },
 
   // settings
-  'GET /api/config': () => ({ config: { ...config, hostPlayitKey: config.hostPlayitKey ? '(saved)' : '' } }),
+  'GET /api/config': () => ({ config: { ...config, hostPlayitKey: config.hostPlayitKey ? '(saved)' : '', batonAdmin: config.batonAdmin ? '(saved)' : '' } }),
   'POST /api/config': ({ body }) => {
     const next = { ...config };
     for (const k of Object.keys(DEFAULT_CONFIG)) if (!k.startsWith('baton') && k in (body.config || {})) next[k] = body.config[k];
@@ -1242,7 +1284,7 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/api/events') {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
     res.write(`event: hello\ndata: ${JSON.stringify({ snapshot: snapshot(), lines: mc.lines.slice(-500), history: statsHistory })}\n\n`);
-    clients.add(res);
+    clients.add(res); remote.nudge();
     req.on('close', () => clients.delete(res));
     return;
   }
@@ -1300,7 +1342,7 @@ server.listen(config.port, '127.0.0.1', async () => {
   if (sharedActive() && !mc.isRunning()) { if (!(await front.start())) mc.log('Live Sync front door: ' + front.error, 'warn'); }
   sync.url().catch(() => {});
   if (!mc.isRunning()) { try { opGuard.scrub(); } catch (e) { mc.log('Op Guard scrub failed: ' + e.message, 'warn'); } }   // e.g. server was last stopped via run.bat
-  baton.boot();
+  baton.boot(); remote.start();
   if (config.autoStartServer && !baton.blocksStart()) mc.start().catch(e => mc.log('Auto-start failed: ' + e.message, 'error'));
 });
 

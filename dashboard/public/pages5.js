@@ -10,10 +10,10 @@
   pages.cloud = {
     title: 'Cloud Host', sub: 'No always-on PC needed: whoever starts the server hosts it, and the world follows',
     render(view, on) {
-      let b = null, hi = null, info = null, testing = null, busy = false, showCode = false, secret = genSecret(), seedTask = null, accounts = null, setupRunning = false;
+      let b = null, hi = null, rc = null, info = null, testing = null, busy = false, showCode = false, secret = genSecret(), seedTask = null, accounts = null, setupRunning = false;
       const tick = [];
 
-      const load = async () => { try { b = await api('/api/baton'); hi = await api('/api/host/info').catch(() => null); } catch (e) { toast(e.message, 'err'); } draw(); if (b && b.configured && !b.remote) refresh(); };
+      const load = async () => { try { b = await api('/api/baton'); hi = await api('/api/host/info').catch(() => null); rc = await api('/api/remote').catch(() => null); } catch (e) { toast(e.message, 'err'); } draw(); if (b && b.configured && !b.remote) refresh(); };
       const refresh = async () => { if (!b || !b.configured || busy) return; try { const s = await post('/api/baton/refresh'); b = { ...b, ...s }; draw(); } catch { /* offline */ } };
       on(kind => { if (kind === 'baton' && S.baton) { b = { ...(b || {}), ...S.baton }; draw(); } if (kind === 'taskdone') { if (data && data.title === 'Set up Cloud Host') { setupRunning = false; accounts = data.code === 'ACCOUNT' && data.extra ? data.extra : null; } load(); } });
       tick.push(setInterval(refresh, 10000), setInterval(() => { if (b && b.hosting) draw(); }, 5000));
@@ -95,6 +95,11 @@
             <div class="row" style="gap:10px;margin-top:12px;flex-wrap:wrap"><a class="btn btn-primary btn-sm" id="hkDl" href="/api/host/client" download>${icn('download', 14)}Download the friend app</a></div>
             <div class="hint" style="margin-top:10px;line-height:1.55">Send it only to friends you trust: it contains the group secret and your playit key. Everybody uses your single address, so <b>don't run playit on your own PC while a friend is hosting</b> (the Cloud Host page stops you from starting your own server then). A friend's PC needs about ${b.ramPlan ? b.ramPlan.minGB : 6} GB of RAM to host.</div></div>
 
+          <div class="card"><div class="card-h">${icn('terminal', 18)}<h2>Control it while a friend hosts</h2>${rc && rc.enabled ? (rc.needsUpdate ? '<span class="tag gold">update needed</span>' : '<span class="tag green">on</span>') : '<span class="tag gold">one-time update</span>'}</div>
+            <div class="muted small" style="line-height:1.6">When a friend's PC runs the server, this dashboard still shows it: who is online, the live console, and you can send commands, op, kick, ban or stop it (it saves and hands back). Only <b>you</b> can do this - it uses a second secret that never leaves this PC, so friends can host but cannot control anything from your side.</div>
+            <div class="row" style="gap:10px;margin-top:12px;flex-wrap:wrap"><button class="btn btn-primary btn-sm" id="rcUpdate">${icn('upload', 14)}${rc && rc.enabled && !rc.needsUpdate ? 'Update cloud again' : 'Update cloud'}</button></div>
+            <div class="hint" style="margin-top:10px;line-height:1.55">Redeploys your free Cloudflare coordinator with the same group code (nothing changes for friends, no world data is touched). A Cloudflare tab may open the first time. Friends need the <b>newest friend app</b> so their PC reports to you - download it again above after updating.</div></div>
+
           <div class="card"><div class="card-h">${icn('key', 18)}<h2>Group</h2></div>
             <div class="grid g-3" style="align-items:start">
               <div class="field"><label>Your name in the group</label><input class="input" id="cbName" value="${esc(b.name || '')}" placeholder="${esc(b.me ? b.me.name : '')}" maxlength="40"></div>
@@ -123,6 +128,7 @@
         const bj = g('btJava'); if (bj) bj.onclick = () => window.BH.javaModal(25);
         act('btStop', async () => { if (await confirmBox({ title: 'Stop and save?', text: 'Everyone is disconnected, the world is uploaded, and the baton is released so a friend can host.', ok: 'Stop & save' })) await post('/api/baton/stop'); });
         act('btAsk', async () => { const r = await post('/api/baton/request'); toast(r.remote && r.remote.wanted ? 'Your friends\' standby PCs will start the server' : 'Request sent', 'ok'); });
+        const ru = g('rcUpdate'); if (ru) ru.onclick = async () => { try { await post('/api/baton/update-cloud'); toast('Updating - a Cloudflare tab may open. Follow the bar at the bottom.', 'info', 6000); } catch (e) { toast(e.message, 'err', 7000); } };
         const hs = g('hkSave'); if (hs) hs.onclick = async () => { try { await post('/api/host/key', { key: g('hkKey').value }); toast('Saved', 'ok'); await load(); } catch (e) { toast(e.message, 'err'); } };
         const hd = g('hkDl'); if (hd) hd.onclick = async e => { if (!hi || !hi.cloud || !hi.address || !hi.key.found) { e.preventDefault(); toast('Finish the checklist above first', 'err'); } else toast('Downloaded - send it to your friends privately', 'ok', 5000); };
         const sb = g('cbStandby'); if (sb) sb.onchange = async () => { try { await post('/api/baton/standby', { on: sb.checked }); } catch (e) { toast(e.message, 'err'); } };
