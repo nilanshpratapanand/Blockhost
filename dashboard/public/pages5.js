@@ -10,10 +10,10 @@
   pages.cloud = {
     title: 'Cloud Host', sub: 'No always-on PC needed: whoever starts the server hosts it, and the world follows',
     render(view, on) {
-      let b = null, info = null, testing = null, busy = false, showCode = false, secret = genSecret(), seedTask = null, accounts = null, setupRunning = false;
+      let b = null, hi = null, info = null, testing = null, busy = false, showCode = false, secret = genSecret(), seedTask = null, accounts = null, setupRunning = false;
       const tick = [];
 
-      const load = async () => { try { b = await api('/api/baton'); } catch (e) { toast(e.message, 'err'); } draw(); if (b && b.configured && !b.remote) refresh(); };
+      const load = async () => { try { b = await api('/api/baton'); hi = await api('/api/host/info').catch(() => null); } catch (e) { toast(e.message, 'err'); } draw(); if (b && b.configured && !b.remote) refresh(); };
       const refresh = async () => { if (!b || !b.configured || busy) return; try { const s = await post('/api/baton/refresh'); b = { ...b, ...s }; draw(); } catch { /* offline */ } };
       on(kind => { if (kind === 'baton' && S.baton) { b = { ...(b || {}), ...S.baton }; draw(); } if (kind === 'taskdone') { if (data && data.title === 'Set up Cloud Host') { setupRunning = false; accounts = data.code === 'ACCOUNT' && data.extra ? data.extra : null; } load(); } });
       tick.push(setInterval(refresh, 10000), setInterval(() => { if (b && b.hosting) draw(); }, 5000));
@@ -84,6 +84,17 @@
             <div class="row" style="flex-wrap:nowrap;gap:14px;align-items:flex-start"><label class="switch" style="flex:none;margin-top:2px"><input type="checkbox" id="cbStandby" ${b.standby ? 'checked' : ''} ${rp.ok ? '' : 'disabled'}><span></span></label>
               <div style="min-width:0"><b>Start automatically when a friend is waiting</b><div class="muted small" style="margin-top:3px">Leave Blockhost open and this PC hosts whenever someone presses "Ask a friend to host". Needs ${rp.minGB} GB of RAM or more.${rp.ok ? '' : ' This PC is below that.'}</div></div></div></div>
 
+          <div class="card"><div class="card-h">${icn('users', 18)}<h2>Let friends host from their own PC</h2>${hi && hi.cloud && hi.address && hi.key.found ? '<span class="tag green">ready</span>' : '<span class="tag gold">almost</span>'}</div>
+            <div class="muted small" style="line-height:1.6">Friends run <b>one file</b> once (the Blockhost Sync tray app). After that, when anyone opens Minecraft and nobody is hosting, their tray asks <i>"Start the server for everyone?"</i> - one click and the server runs on their PC at <b>your one fixed address</b>, then saves to the cloud and sleeps when everyone leaves. This dashboard stays yours; friends never need it.</div>
+            <div class="list" style="margin-top:12px">
+              <div class="list-row"><span class="tag ${hi && hi.cloud ? 'green' : 'red'}">${hi && hi.cloud ? 'yes' : 'no'}</span><div class="grow">Cloud Host group set up</div></div>
+              <div class="list-row"><span class="tag ${hi && hi.address ? 'green' : 'red'}">${hi && hi.address ? 'yes' : 'no'}</span><div class="grow">Server address ${hi && hi.address ? `<span class="mono dim">${esc(hi.address)}</span>` : '- <a href="#/settings">add your playit address in Settings</a>'}</div></div>
+              <div class="list-row"><span class="tag ${hi && hi.key.found ? 'green' : 'red'}">${hi && hi.key.found ? 'found' : 'missing'}</span><div class="grow">Your playit key ${hi && hi.key.found ? `<span class="dim small">(${esc(hi.key.from)})</span>` : '- paste it below (playit.gg &gt; Agents &gt; your agent &gt; secret)'}</div></div>
+            </div>
+            ${hi && !hi.key.found ? `<div class="field" style="margin-top:10px"><div class="input-group"><input class="input mono" id="hkKey" placeholder="playit secret key" autocomplete="off"><button class="btn btn-ghost" id="hkSave">Save key</button></div></div>` : ''}
+            <div class="row" style="gap:10px;margin-top:12px;flex-wrap:wrap"><a class="btn btn-primary btn-sm" id="hkDl" href="/api/host/client" download>${icn('download', 14)}Download the friend app</a></div>
+            <div class="hint" style="margin-top:10px;line-height:1.55">Send it only to friends you trust: it contains the group secret and your playit key. Everybody uses your single address, so <b>don't run playit on your own PC while a friend is hosting</b> (the Cloud Host page stops you from starting your own server then). A friend's PC needs about ${b.ramPlan ? b.ramPlan.minGB : 6} GB of RAM to host.</div></div>
+
           <div class="card"><div class="card-h">${icn('key', 18)}<h2>Group</h2></div>
             <div class="grid g-3" style="align-items:start">
               <div class="field"><label>Your name in the group</label><input class="input" id="cbName" value="${esc(b.name || '')}" placeholder="${esc(b.me ? b.me.name : '')}" maxlength="40"></div>
@@ -112,6 +123,8 @@
         const bj = g('btJava'); if (bj) bj.onclick = () => window.BH.javaModal(25);
         act('btStop', async () => { if (await confirmBox({ title: 'Stop and save?', text: 'Everyone is disconnected, the world is uploaded, and the baton is released so a friend can host.', ok: 'Stop & save' })) await post('/api/baton/stop'); });
         act('btAsk', async () => { const r = await post('/api/baton/request'); toast(r.remote && r.remote.wanted ? 'Your friends\' standby PCs will start the server' : 'Request sent', 'ok'); });
+        const hs = g('hkSave'); if (hs) hs.onclick = async () => { try { await post('/api/host/key', { key: g('hkKey').value }); toast('Saved', 'ok'); await load(); } catch (e) { toast(e.message, 'err'); } };
+        const hd = g('hkDl'); if (hd) hd.onclick = async e => { if (!hi || !hi.cloud || !hi.address || !hi.key.found) { e.preventDefault(); toast('Finish the checklist above first', 'err'); } else toast('Downloaded - send it to your friends privately', 'ok', 5000); };
         const sb = g('cbStandby'); if (sb) sb.onchange = async () => { try { await post('/api/baton/standby', { on: sb.checked }); } catch (e) { toast(e.message, 'err'); } };
         act('cbSave', async () => { await post('/api/baton/settings', { name: g('cbName').value, idleMin: g('cbIdle').value, maxRamGB: g('cbRam').value }); toast('Saved', 'ok'); });
         act('cbTest', async () => { testing = 'running'; draw(); testing = (await post('/api/baton/test')).steps; });

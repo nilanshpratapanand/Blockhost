@@ -315,10 +315,11 @@ class MinecraftServer extends EventEmitter {
     this.setState('stopping');
     const proc = this.proc;
     try { proc.stdin.write('stop\n'); } catch { /* ignore */ }
+    let t;
     const exited = await Promise.race([
       new Promise(r => proc.once('exit', () => r(true))),
-      sleep(timeoutMs).then(() => false),
-    ]);
+      new Promise(r => { t = setTimeout(() => r(false), timeoutMs); }),
+    ]).finally(() => clearTimeout(t));
     if (!exited) { this.log('Server did not stop in time - killing it.', 'warn'); this.kill(); await sleep(1000); }
   }
 

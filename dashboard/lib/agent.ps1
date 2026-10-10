@@ -25,6 +25,7 @@ $CfgFile = Join-Path $Root 'agent.json'
 $StateFile = Join-Path $Root 'state.json'
 $LogFile = Join-Path $Root 'sync.log'
 $Staging = Join-Path $Root 'staging'
+$HostDir = Join-Path $Root 'host'
 $script:Tray = $null
 $script:Busy = $false
 $script:Status = 'Starting...'
@@ -567,8 +568,147 @@ function Invoke-Sync([switch]$Force) {
   } finally { $script:Busy = $false }
 }
 
+# ----------------------------------------------------------------------------------- hosting (friends start the shared server from here)
+# A small Node program (lib/player.js, shipped inside this file) pulls the newest world from the cloud, runs the server on THIS PC
+# and opens the owner's shared address. This tray app starts it on demand and talks to it on 127.0.0.1.
+$script:HS = $null
+$script:LastPhase = ''
+$script:AskedAt = [datetime]::MinValue
+$script:GameWas = $false
+function Test-HostMode { return [bool](Prop $Cfg 'hostMode' $false) }
+function Ensure-Node {
+  $nodeDir = Join-Path $HostDir 'node'; $exe = Join-Path $nodeDir 'node.exe'
+  if (Test-Path -LiteralPath $exe) { return $true }
+  $tmp = Join-Path $HostDir 'node-unpack'
+  try {
+    Say 'Downloading Node.js, the engine that runs the server helper (about 30 MB, first time only)...' 'Cyan'
+    New-Item -ItemType Directory -Force -Path $HostDir | Out-Null
+    $idx = Invoke-RestMethod -UseBasicParsing -Uri 'https://nodejs.org/dist/index.json'
+    $rel = $idx | Where-Object { $_.lts -and ($_.files -contains 'win-x64-zip') } | Select-Object -First 1
+    if (-not $rel) { throw 'no Node.js release found' }
+    $ver = [string]$rel.version; $name = "node-$ver-win-x64.zip"
+    $sums = (Invoke-WebRequest -UseBasicParsing -Uri "https://nodejs.org/dist/$ver/SHASUMS256.txt").Content
+    if ($sums -is [byte[]]) { $sums = [Text.Encoding]::UTF8.GetString($sums) }
+    $line = ($sums -split "`n" | Where-Object { $_ -match ("\s" + [regex]::Escape($name) + "\s*$") } | Select-Object -First 1)
+    if (-not $line) { throw 'no checksum listed for the Node.js download' }
+    $want = (($line.Trim() -split '\s+')[0]).ToLower()
+    $zip = Join-Path $HostDir 'node.zip'
+    Invoke-WebRequest -UseBasicParsing -Uri "https://nodejs.org/dist/$ver/$name" -OutFile $zip
+    if ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLower() -ne $want) { Remove-Item -LiteralPath $zip -Force; throw 'the Node.js download did not match its checksum' }
+    Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    Expand-Archive -LiteralPath $zip -DestinationPath $tmp -Force
+    Remove-Item -LiteralPath $zip -Force
+    $inner = Get-ChildItem -LiteralPath $tmp -Directory | Select-Object -First 1
+    Remove-Item -LiteralPath $nodeDir -Recurse -Force -ErrorAction SilentlyContinue
+    Move-Item -LiteralPath $inner.FullName -Destination $nodeDir
+    Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    Log "Node.js $ver installed"
+    return (Test-Path -LiteralPath $exe)
+  } catch { Log "Node.js download failed: $($_.Exception.Message)"; Say "Could not get Node.js: $($_.Exception.Message)" 'Red'; return $false }
+}
+function Install-HostFiles($H) {
+  $null = Invoke-Player 'POST' '/quit' $null 5
+  if (Get-PlayerCtl) { Start-Sleep -Seconds 3 }
+  $app = Join-Path $HostDir 'app'
+  New-Item -ItemType Directory -Force -Path $app | Out-Null
+  foreach ($f in $H.files.PSObject.Properties) { [IO.File]::WriteAllBytes((Join-Path $app $f.Name), [Convert]::FromBase64String([string]$f.Value)) }
+  $hj = [pscustomobject]@{ code = $H.code; playitKey = $H.playitKey; address = $H.address; world = $H.world; name = (Prop $H 'name' '') }
+  Write-Json (Join-Path $HostDir 'host.json') $hj
+}
+function Get-PlayerCtl {
+  $c = Read-Json (Join-Path $HostDir 'control.json') $null
+  if (-not $c) { return $null }
+  try { $null = Get-Process -Id ([int]$c.pid) -ErrorAction Stop } catch { return $null }
+  return $c
+}
+function Invoke-Player([string]$Method, [string]$Path, $Body = $null, [int]$Timeout = 10) {
+  $c = Get-PlayerCtl; if (-not $c) { return $null }
+  try {
+    $a = @{ Uri = "http://127.0.0.1:$($c.port)$Path"; Method = $Method; Headers = @{ 'x-bh-token' = [string]$c.token }; TimeoutSec = $Timeout; UseBasicParsing = $true }
+    if ($Method -eq 'POST') { $a.ContentType = 'application/json'; $a.Body = $(if ($Body) { ($Body | ConvertTo-Json -Compress) } else { '{}' }) }
+    return (Invoke-RestMethod @a)
+  } catch { Log "helper call $Path failed: $($_.Exception.Message)"; return $null }
+}
+function Start-Player {
+  if (Get-PlayerCtl) { return $true }
+  $node = Join-Path $HostDir 'node\node.exe'; $js = Join-Path $HostDir 'app\player.js'
+  if (-not (Test-Path -LiteralPath $js)) { Log 'player.js missing'; return $false }
+  if (-not (Test-Path -LiteralPath $node)) { if (-not (Ensure-Node)) { return $false } }
+  $sp = @{ FilePath = $node; ArgumentList = @(('"' + $js + '"'), ('"' + $HostDir + '"')) }
+  if ($IsWin) { $sp.WindowStyle = 'Hidden' }
+  Start-Process @sp
+  for ($i = 0; $i -lt 60; $i++) { Start-Sleep -Milliseconds 250; if (Get-PlayerCtl) { return $true } }
+  Log 'the server helper did not start'; return $false
+}
+function Start-HostServer {
+  if (-not (Start-Player)) { Notify 'Blockhost' 'Could not start the server helper. Tray icon > Show log for details.'; return }
+  $st = Invoke-Player 'POST' '/start' $null 180
+  if (-not $st) { Notify 'Blockhost' 'The server helper did not answer. Try again in a minute.'; return }
+  if ($st.ok -eq $false -and $st.error) { Notify 'Blockhost' ([string]$st.error); return }
+  Notify 'Blockhost' 'Starting the server on this PC... a notification will tell you when friends can join.'
+}
+function Get-HostLine($st) {
+  if (-not $st) { return 'Server: asleep (nobody is hosting)' }
+  switch ([string]$st.phase) {
+    'hosting' { return "Server: ONLINE from this PC ($($st.players) playing)" }
+    { $_ -in 'checking', 'acquiring' } { return 'Server: checking...' }
+    'downloading' { return "Server: getting the latest world... $($st.message)" }
+    'starting' { return 'Server: starting...' }
+    'saving' { return "Server: saving the world... $($st.message)" }
+    'error' { return "Server problem: $($st.message)" }
+    'lost' { return 'Server: another PC took over' }
+  }
+  if ($st.remote -and $st.remote.state -eq 'hosted') { return "Server: online - hosted by $($st.remote.host.name)" }
+  return 'Server: asleep (nobody is hosting)'
+}
+# runs on every tray tick: notices state changes of the helper and tells the user once
+function Invoke-HostPoll {
+  if (-not (Get-PlayerCtl)) { $script:HS = $null; return }
+  $st = Invoke-Player 'GET' '/state' $null 4
+  if (-not $st) { return }
+  $script:HS = $st
+  $ph = [string]$st.phase
+  if ($ph -ne $script:LastPhase) {
+    $prev = $script:LastPhase; $script:LastPhase = $ph
+    if ($ph -eq 'hosting') { Notify 'Server is online' "Friends can join now: $($st.address)" }
+    elseif ($ph -eq 'off' -and $prev -in 'saving', 'hosting') { Notify 'Server asleep' 'The world is saved to the cloud. It starts again when someone opens Minecraft.' }
+    elseif ($ph -eq 'error') { Notify 'Server problem' ([string]$st.message) }
+    elseif ($ph -eq 'lost') { Notify 'Server' ([string]$st.message) }
+  }
+}
+# Minecraft was just opened: if nobody is hosting, offer to start the server for everyone
+function Invoke-HostJoinCheck {
+  if (((Get-Date) - $script:AskedAt) -lt [TimeSpan]::FromMinutes(10)) { return }
+  if (-not (Start-Player)) { Notify 'Blockhost' 'Could not start the server helper. Tray icon > Show log for details.'; return }
+  $st = Invoke-Player 'GET' '/state?fresh=1' $null 20
+  if (-not $st) { return }
+  $script:HS = $st
+  $addr = [string]$st.address
+  if ($st.hosting) { return }
+  if ($st.phase -in 'checking', 'acquiring', 'downloading', 'starting') { Notify 'Blockhost' 'The server is starting - a notification will tell you when to join.'; return }
+  if ($st.remoteErr) { Log "cloud: $($st.remoteErr)"; Notify 'Blockhost' "Can't reach the cloud right now: $($st.remoteErr)"; return }
+  if ($st.remote -and $st.remote.state -eq 'hosted') { $script:AskedAt = Get-Date; Notify 'Server is online' "$($st.remote.host.name) is hosting. Join: $addr"; return }
+  $script:AskedAt = Get-Date
+  if ($st.ramPlan.ok) {
+    if (Ask 'Blockhost' "The server is asleep.`r`n`r`nStart it for everyone now? It runs on this PC (about $($st.ramPlan.ramGB) GB of RAM), saves itself to the cloud and goes back to sleep when everyone has left.") { Start-HostServer }
+  } else {
+    $null = Invoke-Player 'POST' '/request' $null 15
+    Notify 'Blockhost' "This PC ($($st.ramPlan.totalGB) GB RAM) is too small to host, so I asked another friend's PC to wake the server. Hold on a minute."
+  }
+}
+function Update-HostMenu {
+  $st = $script:HS
+  $busy = $st -and ($st.phase -in 'checking', 'acquiring', 'downloading', 'starting', 'saving')
+  $mine = $st -and $st.hosting
+  $miHost.Text = Get-HostLine $st
+  $miStart.Enabled = (-not $busy) -and (-not $mine) -and (-not ($st -and $st.remote -and $st.remote.state -eq 'hosted'))
+  $miStop.Enabled = [bool]$mine
+  $miAddr.Enabled = [bool]($st -and $st.address) -or [bool](Prop (Read-Json (Join-Path $HostDir 'host.json') $null) 'address')
+}
+
 # ----------------------------------------------------------------------------------- uninstall
 function Remove-Agent {
+  if (Test-HostMode) { $null = Invoke-Player 'POST' '/quit' $null 5; Start-Sleep -Seconds 4 }
   if ($IsWin) { Remove-Item -LiteralPath (Join-Path ([Environment]::GetFolderPath('Startup')) 'Blockhost Sync.lnk') -Force -ErrorAction SilentlyContinue }
   Remove-Item -LiteralPath $Root -Recurse -Force -ErrorAction SilentlyContinue
 }
@@ -582,8 +722,11 @@ if ($Mode -eq 'install') {
   Say 'Blockhost Sync - your Minecraft stays in sync with the host automatically' 'Gray'
   Say ''
   Say 'This installs a small helper that runs in the background (tray icon, starts with Windows).' 'White'
-  Say 'Whenever the host adds or removes shaders, texture packs or mods, it updates this PC by itself.' 'White'
-  Say 'If Minecraft is open it waits until you close it (or asks to restart, if the host wants that).' 'White'
+  if (Prop $D 'host' $null) { Say 'It also lets YOUR PC host the shared server when a friend wants to play and nobody else is online:' 'White'; Say 'open Minecraft and it asks "Start the server for everyone?". The world is saved to the cloud afterwards.' 'White' }
+  if (-not (Prop $D 'hostOnly' $false)) {
+    Say 'Whenever the host adds or removes shaders, texture packs or mods, it updates this PC by itself.' 'White'
+    Say 'If Minecraft is open it waits until you close it (or asks to restart, if the host wants that).' 'White'
+  }
   Say 'Your own mods are never touched. Remove it any time: tray icon > Uninstall.' 'DarkGray'
   Say ''
   if (-not $NoGui) {
@@ -597,15 +740,26 @@ if ($Mode -eq 'install') {
   $at = $src.IndexOf('#AGENT_START')
   [IO.File]::WriteAllText((Join-Path $Root 'agent.ps1'), $src.Substring($at))
   $old = Read-Json $CfgFile $null
-  $Cfg = [pscustomobject]@{ urls = @($D.urls); mc = (Prop $D 'mc' $null); mcHost = (Prop $D 'mcHost' ''); token = $D.token; pub = $D.pub; keyId = $D.keyId; serverName = $D.serverName; installed = (Get-Date).ToString('s') }
+  $Cfg = [pscustomobject]@{ urls = @($D.urls); mc = (Prop $D 'mc' $null); mcHost = (Prop $D 'mcHost' ''); token = $D.token; pub = $D.pub; keyId = $D.keyId; serverName = $D.serverName; installed = (Get-Date).ToString('s'); hostMode = [bool](Prop $D 'host' $null); hostOnly = [bool](Prop $D 'hostOnly' $false) }
   if ($old -and $old.keyId -ne $D.keyId) { Remove-Item -LiteralPath $StateFile -Force -ErrorAction SilentlyContinue }
   Write-Json $CfgFile $Cfg
   Log "installed for $($D.serverName) ($($D.urls -join ', '))"
   Say "Minecraft folder: $(Find-GameDir)" 'White'
-  Say 'Syncing for the first time...' 'Cyan'
-  $r = Invoke-Sync -Force
-  if ($script:LastError) { Say $r 'Red'; Say 'The helper will keep retrying in the background (is the host online?).' 'Yellow' } else { Say $r 'Green' }
-  foreach ($l in (Get-Content -LiteralPath $LogFile -Tail 25)) { if ($l -match 'installed|downloaded|selected|added|switched|removed') { Say ('  ' + $l.Substring(21)) 'DarkGray' } }
+  if (-not $Cfg.hostOnly) {
+    Say 'Syncing for the first time...' 'Cyan'
+    $r = Invoke-Sync -Force
+    if ($script:LastError) { Say $r 'Red'; Say 'The helper will keep retrying in the background (is the host online?).' 'Yellow' } else { Say $r 'Green' }
+    foreach ($l in (Get-Content -LiteralPath $LogFile -Tail 25)) { if ($l -match 'installed|downloaded|selected|added|switched|removed') { Say ('  ' + $l.Substring(21)) 'DarkGray' } }
+  }
+  if ($Cfg.hostMode) {
+    Install-HostFiles $D.host
+    if (Ensure-Node) {
+      Say 'Getting Java and the tunnel helper ready (first time only, a few minutes)...' 'Cyan'
+      & (Join-Path $HostDir 'node\node.exe') (Join-Path $HostDir 'app\player.js') $HostDir prepare
+      if ($LASTEXITCODE -ne 0) { Say 'Some downloads failed - the helper will retry the first time you start the server.' 'Yellow' } else { Say 'Ready to host.' 'Green' }
+    } else { Say 'Hosting is not ready yet - the helper will retry when you first start the server.' 'Yellow' }
+    if ($D.host.address) { try { New-Item -ItemType Directory -Force -Path (Find-GameDir) | Out-Null; [void](Add-ServerEntry (Find-GameDir) $D.serverName ([string]$D.host.address)); Say "Added '$($D.serverName)' to your Minecraft server list." 'Green' } catch { Log "server list: $($_.Exception.Message)" } }
+  }
   if ($IsWin) {
     $lnk = Join-Path ([Environment]::GetFolderPath('Startup')) 'Blockhost Sync.lnk'
     $ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut($lnk)
@@ -623,14 +777,14 @@ if ($Mode -eq 'install') {
 }
 if (-not $Cfg) { Say 'Blockhost Sync is not installed - run the Blockhost Sync .bat from your host.' 'Yellow'; return }
 if ($Mode -eq 'uninstall') { Remove-Agent; Say 'Blockhost Sync removed.' 'Green'; return }
-if ($Mode -eq 'once') { $r = Invoke-Sync; Say $r; return }
+if ($Mode -eq 'once') { if (Prop $Cfg 'hostOnly' $false) { Say 'Hosting only - nothing to sync.'; return }; $r = Invoke-Sync; Say $r; return }
 if ($Mode -eq 'repair') { $r = Invoke-Sync -Force; Say $r; return }
 if ($Mode -eq 'lib') { return }   # dot-sourced for tests
 
 # ----------------------------------------------------------------------------------- background agent with tray icon
 $script:Mutex = New-Object Threading.Mutex($false, "Local\BlockhostSync-$($Cfg.keyId)")
 if (-not $script:Mutex.WaitOne(0)) { return }
-if ($NoGui) { while ($true) { [void](Invoke-Sync); Start-Sleep -Seconds 45 } }
+if ($NoGui) { while ($true) { if (-not (Prop $Cfg 'hostOnly' $false)) { [void](Invoke-Sync) }; Start-Sleep -Seconds 45 } }
 
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 function New-DotIcon($color) {
@@ -655,16 +809,36 @@ function Refresh-Tray {
   $script:Tray.Text = $t
   if ($script:LastError -and $script:LastError -notmatch 'not reachable') { $script:Tray.Icon = $Icons.bad } elseif ($script:Pending -gt 0 -or $script:LastError) { $script:Tray.Icon = $Icons.wait } else { $script:Tray.Icon = $Icons.ok }
 }
+if (Test-HostMode) {
+  $miHost = $menu.Items.Add('Server: checking...'); $miHost.Enabled = $false
+  $miStart = $menu.Items.Add('Start the server for everyone')
+  $miStart.add_Click({ Start-HostServer; Invoke-HostPoll; Update-HostMenu })
+  $miStop = $menu.Items.Add('Stop the server (save and let it sleep)')
+  $miStop.add_Click({ if (Ask 'Blockhost' 'Stop the server? Everyone will be disconnected. The world is saved to the cloud first.') { $null = Invoke-Player 'POST' '/stop' $null 10; Notify 'Blockhost' 'Saving the world, then the server sleeps...' } })
+  $miAddr = $menu.Items.Add('Copy the server address')
+  $miAddr.add_Click({ $a = ''; if ($script:HS) { $a = [string]$script:HS.address }; if (-not $a) { $a = [string](Prop (Read-Json (Join-Path $HostDir 'host.json') $null) 'address' '') }; if ($a) { [Windows.Forms.Clipboard]::SetText($a); Notify 'Blockhost' "Copied: $a" } })
+  $miStandby = $menu.Items.Add('Start the server automatically when a friend asks')
+  $miStandby.CheckOnClick = $true; $miStandby.Checked = [bool](Prop $Cfg 'standby' $false)
+  $miStandby.add_Click({
+    $on = [bool]$miStandby.Checked
+    $Cfg | Add-Member -NotePropertyName standby -NotePropertyValue $on -Force; Write-Json $CfgFile $Cfg
+    if (Start-Player) { $null = Invoke-Player 'POST' '/standby' @{ on = $on } 10 }
+    Notify 'Blockhost' $(if ($on) { 'This PC will wake the server when a friend asks (needs the PC on and this icon running).' } else { 'Automatic wake-up is off.' }) })
+  $menu.add_Opening({ Invoke-HostPoll; Update-HostMenu })
+  [void]$menu.Items.Add('-')
+}
+if (-not (Prop $Cfg 'hostOnly' $false)) {
 $menu.Items.Add('Sync now').add_Click({ [void](Invoke-Sync); Refresh-Tray; Notify 'Blockhost Sync' $script:Status })
 $menu.Items.Add('Repair my Minecraft setup').add_Click({ [void](Invoke-Sync -Force); Refresh-Tray; Notify 'Blockhost Sync' $script:Status })
+}
 $menu.Items.Add('Open Minecraft folder').add_Click({ Start-Process explorer.exe (Find-GameDir) })
 $menu.Items.Add('Show log').add_Click({ Start-Process notepad.exe $LogFile })
 [void]$menu.Items.Add('-')
 $menu.Items.Add('Uninstall Blockhost Sync').add_Click({
   if (Ask 'Blockhost Sync' 'Stop syncing with this server and remove the helper? (Packs already installed stay.)') { Remove-Agent; $script:Tray.Visible = $false; [Windows.Forms.Application]::Exit() } })
-$menu.Items.Add('Exit (until next restart)').add_Click({ $script:Tray.Visible = $false; [Windows.Forms.Application]::Exit() })
+$menu.Items.Add('Exit (until next restart)').add_Click({ if (Test-HostMode) { $null = Invoke-Player 'POST' '/quit' $null 5 }; $script:Tray.Visible = $false; [Windows.Forms.Application]::Exit() })
 $script:Tray.ContextMenuStrip = $menu
-$script:Tray.add_DoubleClick({ [void](Invoke-Sync); Refresh-Tray; Notify 'Blockhost Sync' $script:Status })
+$script:Tray.add_DoubleClick({ if (Test-HostMode) { Invoke-HostPoll; Notify 'Blockhost' (Get-HostLine $script:HS) } else { [void](Invoke-Sync); Refresh-Tray; Notify 'Blockhost Sync' $script:Status } })
 
 $timer = New-Object Windows.Forms.Timer
 $timer.Interval = 4000
@@ -672,9 +846,22 @@ $script:Ticks = 0
 $timer.add_Tick({
   $script:Ticks++
   # every 45 s a full check; while an update is waiting, a cheap 4-second "has the game closed?" check
+  $syncing = -not (Prop $Cfg 'hostOnly' $false)
   $full = ($script:Ticks % 11 -eq 1)
   if (-not $full -and $script:Pending -gt 0 -and -not (Get-GameProcs)) { $full = $true }
-  if ($full) { [void](Invoke-Sync); Refresh-Tray }
+  if ($full -and $syncing) { [void](Invoke-Sync); Refresh-Tray }
+  if (Test-HostMode) {
+    try {
+      Invoke-HostPoll
+      $game = [bool](Get-GameProcs)
+      if ($game -and -not $script:GameWas) { $script:GameWas = $true; Invoke-HostJoinCheck } elseif (-not $game) { $script:GameWas = $false }
+      if (-not $syncing -and $script:Ticks -eq 1) {
+        if (Prop $Cfg 'standby' $false) { if (Start-Player) { $null = Invoke-Player 'POST' '/standby' @{ on = $true } 10 } }
+        $script:Status = Get-HostLine $script:HS; $script:Tray.Icon = $Icons.ok; $script:Tray.Text = 'Blockhost'
+      }
+    } catch { Log "host tick: $($_.Exception.Message)" }
+    if (-not $syncing) { $miStatus.Text = Get-HostLine $script:HS; $script:Tray.Icon = $(if ($script:HS -and $script:HS.hosting) { $Icons.ok } elseif ($script:HS -and $script:HS.phase -in 'error', 'lost') { $Icons.bad } else { $Icons.wait }) }
+  }
 })
 $timer.Start()
 Log "agent v$AgentVersion started"

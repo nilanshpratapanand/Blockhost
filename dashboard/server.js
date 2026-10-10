@@ -25,6 +25,7 @@ const { Packs } = require('./lib/packs');
 const { installPlayit, createDesktopShortcut } = require('./lib/playit');
 const { SyncHost } = require('./lib/sync');
 const { buildSyncBat, agentScript } = require('./lib/syncagent');
+const hostBundle = require('./lib/hostbundle');
 const { FrontDoor } = require('./lib/frontdoor');
 const { FastLane } = require('./lib/fastlane');
 const { OpGuard } = require('./lib/opguard');
@@ -852,7 +853,7 @@ const routes = {
   },
 
   // settings
-  'GET /api/config': () => ({ config }),
+  'GET /api/config': () => ({ config: { ...config, hostPlayitKey: config.hostPlayitKey ? '(saved)' : '' } }),
   'POST /api/config': ({ body }) => {
     const next = { ...config };
     for (const k of Object.keys(DEFAULT_CONFIG)) if (!k.startsWith('baton') && k in (body.config || {})) next[k] = body.config[k];
@@ -1098,6 +1099,37 @@ const streamRoutes = {
     const ep = await sync.endpoints();
     const bat = buildSyncBat({ serverName: name, urls: ep.urls, mc: ep.mc, mcHost: sync.mcHost(), token: config.syncToken, pub: sync.publicKey, keyId: sync.keyId });
     const base = `Blockhost-Sync-${name.replace(/[^\w\-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 30) || 'server'}`;
+    res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Disposition': `attachment; filename="${base}.bat"` });
+    res.end(bat);
+  },
+  // ---- friends host the server through the Blockhost Sync tray app (the dashboard stays owner-only)
+  'GET /api/host/info': ({ res }) => {
+    const k = hostBundle.findPlayitKey(config.hostPlayitKey, { serverDir: SERVER_DIR, dashDir: DASH_DIR });
+    U.sendJSON(res, 200, { cloud: !!config.batonCode, address: config.serverAddress || '', world: serverProps()['level-name'] || 'world', key: { found: !!k.key, from: k.from }, sync: !!config.syncEnabled });
+  },
+  'POST /api/host/key': async ({ req, res }) => {
+    const body = await U.readJSONBody(req);
+    const k = String(body.key || '').trim();
+    if (k && !/^[A-Za-z0-9_\-]{16,200}$/.test(k)) throw new Error('That does not look like a playit secret key.');
+    saveConfig({ hostPlayitKey: k }); U.sendJSON(res, 200, { ok: true });
+  },
+  'GET /api/host/client': async ({ res }) => {
+    if (!config.batonCode) throw new Error('Set up Cloud Host first (Cloud Host page) - friends host through it.');
+    if (!config.serverAddress) throw new Error('Enter your server address in Settings first - it is the one address everybody joins.');
+    const key = hostBundle.findPlayitKey(config.hostPlayitKey, { serverDir: SERVER_DIR, dashDir: DASH_DIR });
+    if (!key.key) throw new Error('Could not find your playit key. Paste it on the Live Sync page (Friends host) first.');
+    const name = String(serverProps().motd || '').replace(/\\u00a7./gi, '').replace(/§./g, '').trim() || 'Minecraft Server';
+    const host = { code: config.batonCode, playitKey: key.key, address: config.serverAddress, world: serverProps()['level-name'] || 'world', name, files: hostBundle.runtimeFiles() };
+    let d;
+    try {
+      if (!config.syncEnabled || !(await sync.url())) throw new Error('no sync');
+      const ep = await sync.endpoints();
+      d = { serverName: name, urls: ep.urls, mc: ep.mc, mcHost: sync.mcHost(), token: config.syncToken, pub: sync.publicKey, keyId: sync.keyId, host };
+    } catch {
+      d = { serverName: name, urls: [], token: '', pub: null, keyId: 'h' + require('crypto').createHash('sha256').update(config.batonCode).digest('hex').slice(0, 12), hostOnly: true, host };
+    }
+    const bat = buildSyncBat(d);
+    const base = `Blockhost-Play-${name.replace(/[^\w\-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 30) || 'server'}`;
     res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Disposition': `attachment; filename="${base}.bat"` });
     res.end(bat);
   },

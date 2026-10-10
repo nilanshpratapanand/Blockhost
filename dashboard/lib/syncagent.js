@@ -7,7 +7,7 @@ const path = require('path');
 const AGENT_FILE = path.join(__dirname, 'agent.ps1');
 const agentScript = () => fs.readFileSync(AGENT_FILE, 'utf8').replace(/\r?\n/g, '\r\n');
 
-/** d: {serverName, urls[], token, pub{n,e}, keyId} */
+/** d: {serverName, urls[], token, pub{n,e}, keyId, hostOnly?, host?{code, playitKey, address, world, name, files{name:base64}}} */
 function buildSyncBat(d) {
   const data = Buffer.from(JSON.stringify(d), 'utf8').toString('base64');
   const safeName = String(d.serverName).replace(/[^\w .\-]/g, '');
