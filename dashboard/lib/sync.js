@@ -12,7 +12,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 const FOLDERS = new Set(['mods', 'resourcepacks', 'shaderpacks']);
-const AGENT_VERSION = 2;
+const AGENT_VERSION = 3;
 
 /** SRV lookup that also works when the PC's own DNS doesn't answer SRV queries:
  *  system DNS -> Cloudflare/Google DNS servers -> DNS-over-HTTPS. */

@@ -1119,7 +1119,7 @@ const streamRoutes = {
     const key = hostBundle.findPlayitKey(config.hostPlayitKey, { serverDir: SERVER_DIR, dashDir: DASH_DIR });
     if (!key.key) throw new Error('Could not find your playit key. Paste it on the Live Sync page (Friends host) first.');
     const name = String(serverProps().motd || '').replace(/\\u00a7./gi, '').replace(/§./g, '').trim() || 'Minecraft Server';
-    const host = { code: config.batonCode, playitKey: key.key, address: config.serverAddress, world: serverProps()['level-name'] || 'world', name, files: hostBundle.runtimeFiles() };
+    const host = { code: config.batonCode, playitKey: key.key, address: config.serverAddress, world: serverProps()['level-name'] || 'world', port: publicPort(), name, files: hostBundle.runtimeFiles() };
     let d;
     try {
       if (!config.syncEnabled || !(await sync.url())) throw new Error('no sync');

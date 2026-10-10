@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const FILES = ['player.js', 'provision.js', 'baton.js', 'batonhost.js', 'mc.js', 'perf.js', 'props.js', 'zipread.js', 'java.js', 'util.js', 'playit.js'];
+const FILES = ['player.js', 'provision.js', 'baton.js', 'batonhost.js', 'mc.js', 'perf.js', 'props.js', 'zipread.js', 'java.js', 'util.js', 'playit.js', 'hostbundle.js'];
 
 /** {name: base64} of the runtime sources */
 function runtimeFiles(libDir = __dirname) {

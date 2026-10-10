@@ -91,8 +91,8 @@ test('a friend PC pulls the world, hosts, is protected by the token, and hands b
   // friend PC
   const fd = tmp('friend'); const javaDir = path.join(fd, 'fakejava'); fs.mkdirSync(javaDir, { recursive: true });
   const javaPath = path.join(javaDir, 'java'); fs.writeFileSync(javaPath, FAKE_JAVA, { mode: 0o755 });
-  fs.writeFileSync(path.join(fd, 'host.json'), JSON.stringify({ code: encodeCode(url, secret), address: 'play.example:1234', world: 'world', name: 'Test' }));
-  const p = createPlayer({ dir: fd, fetchImpl, ensureJre: async () => javaPath, installPlayit: async () => {}, noExit: true, config: { batonMinHostGB: 1, batonName: 'Friend' }, idleMsOverride: 300, timing: { tickMs: 100, heartbeatMs: 500, crashMs: 400 } });
+  fs.writeFileSync(path.join(fd, 'host.json'), JSON.stringify({ code: encodeCode(url, secret), address: 'play.example:1234', world: 'world', port: 25599, name: 'Test' }));
+  const p = createPlayer({ dir: fd, fetchImpl, ensureJre: async () => javaPath, installPlayit: async () => {}, pingAddress: async () => ({ ok: true }), reachDelayMs: 50, noExit: true, config: { batonMinHostGB: 1, batonName: 'Friend' }, idleMsOverride: 300, timing: { tickMs: 100, heartbeatMs: 500, crashMs: 400 } });
   const ctl = await p.listen();
   try {
     assert.strictEqual((await call({ ...ctl, token: 'wrong' }, 'GET', '/state')).status, 403);
@@ -102,6 +102,8 @@ test('a friend PC pulls the world, hosts, is protected by the token, and hands b
     await until(async () => (await call(ctl, 'GET', '/state')).body.phase === 'hosting');
     assert.strictEqual(fs.readFileSync(path.join(fd, 'server', 'world', 'level.dat'), 'utf8'), 'LEVEL-1');
     assert.strictEqual(cloud.s.host.name, 'Friend');
+    assert.match(fs.readFileSync(path.join(fd, 'server', 'server.properties'), 'utf8'), /server-port=25599/);
+    await until(async () => ((await call(ctl, 'GET', '/state')).body.reach || {}).state === 'ok');
     // server sits empty -> saved and handed back
     await until(async () => (await call(ctl, 'GET', '/state')).body.phase === 'off' && cloud.s.expiresAt === 0, 20000);
     assert.ok(!p.mc.isRunning());

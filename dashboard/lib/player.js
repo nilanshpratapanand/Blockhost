@@ -9,7 +9,9 @@ const path = require('path');
 const http = require('http');
 const os = require('os');
 const crypto = require('crypto');
+const net = require('net');
 const { spawn } = require('child_process');
+const { parseSecret } = require('./hostbundle');
 const props = require('./props');
 const { MinecraftServer } = require('./mc');
 const { BatonHost } = require('./batonhost');
@@ -80,15 +82,31 @@ function createPlayer(o) {
     const p = path.join(binDir, IS_WIN ? 'playit.exe' : 'playit');
     return fs.existsSync(p) ? p : null;
   }
+  // playit's Windows build is a daemon ("playitd"): it takes --secret / --socket-path / --log-path, and refuses to start when the
+  // playit Windows service is already running on this PC. If that service already uses the group's key, the tunnel exists - don't start a second one.
+  function serviceHasKey() {
+    if (!IS_WIN || !host.playitKey) return false;
+    try { return parseSecret(fs.readFileSync(path.join(process.env.ProgramData || 'C:\\ProgramData', 'playit_gg', 'playit.toml'), 'utf8')) === host.playitKey; } catch { return false; }
+  }
+  const playitLog = path.join(dir, 'playit.log');
   function startPlayit() {
     if (P.playit || !host.playitKey) return;
+    if (serviceHasKey()) { P.playitErr = ''; P.tunnelVia = 'the playit service already running on this PC'; log('Using the playit service already running on this PC.'); return; }
     const exe = playitExe();
     if (!exe) { P.playitErr = 'The tunnel helper is missing.'; return; }
-    P.playitErr = '';
-    const spawnIt = o.spawnPlayit || ((x, env) => spawn(x, [], { env, windowsHide: true, stdio: 'ignore' }));
-    const child = spawnIt(exe, { ...process.env, SECRET_KEY: host.playitKey });
+    P.playitErr = ''; P.tunnelVia = 'its own tunnel helper';
+    const spawnIt = o.spawnPlayit || ((x, env) => {
+      const out = fs.openSync(playitLog, 'w');
+      return spawn(x, ['--socket-path', IS_WIN ? '\\\\.\\pipe\\blockhost-playit' : path.join(dir, 'playit.sock'), '--log-path', path.join(dir, 'playitd.log')], { env, windowsHide: true, stdio: ['ignore', out, out] });
+    });
+    const child = spawnIt(exe, { ...process.env, SECRET: host.playitKey, SECRET_KEY: host.playitKey });
     P.playit = child; log('Tunnel started.');
-    child.on('exit', code => { if (P.playit === child) { P.playit = null; log('Tunnel stopped (' + code + ').'); } });
+    child.on('exit', code => {
+      if (P.playit === child) {
+        P.playit = null; log('Tunnel stopped (' + code + ').');
+        if (code) { let t = ''; try { t = fs.readFileSync(playitLog, 'utf8').trim().split(/\r?\n/).slice(-3).join(' | '); } catch { /* none */ } P.playitErr = `The tunnel helper stopped (code ${code}). ${t}`.slice(0, 300); log('Tunnel output: ' + t); }
+      }
+    });
     child.on('error', e => { P.playitErr = e.message; if (P.playit === child) P.playit = null; });
   }
   function stopPlayit() { const c = P.playit; P.playit = null; if (c) { try { c.kill(); } catch { /* gone */ } log('Tunnel closed.'); } }
@@ -102,11 +120,42 @@ function createPlayer(o) {
       P.prep = `Getting Java ${need}...`;
       try { saveConfig({ javaPath: await doEnsureJre(path.join(dir, 'java'), need, { log, progress: () => {} }) }); } finally { P.prep = ''; }
     }
+    if (host.port) { try { props.setMany(path.join(serverDir, 'server.properties'), { 'server-port': String(host.port) }); } catch (e) { log('Could not set the server port: ' + e.message); } }
     return rawStart();
   };
 
+
+  // can the internet reach the shared address? A Minecraft "status" ping through the public address, from this PC
+  function pingAddress(addr, timeoutMs = 6000) {
+    return new Promise(resolve => {
+      const m = String(addr || '').match(/^([^:]+)(?::(\d+))?$/); if (!m) return resolve({ ok: false, error: 'no address' });
+      const hostName = m[1], port = Number(m[2]) || 25565;
+      const vi = n => { const b = []; do { let x = n & 0x7f; n >>>= 7; if (n) x |= 0x80; b.push(x); } while (n); return Buffer.from(b); };
+      const str = t => { const b = Buffer.from(t, 'utf8'); return Buffer.concat([vi(b.length), b]); };
+      const pk = body => Buffer.concat([vi(body.length), body]);
+      const port2 = Buffer.alloc(2); port2.writeUInt16BE(port);
+      const sock = net.connect({ host: hostName, port });
+      let done = false, got = Buffer.alloc(0);
+      const fin = r => { if (done) return; done = true; clearTimeout(t); sock.destroy(); resolve(r); };
+      const t = setTimeout(() => fin({ ok: false, error: 'no answer in ' + Math.round(timeoutMs / 1000) + ' s' }), timeoutMs);
+      sock.on('connect', () => { sock.write(pk(Buffer.concat([vi(0), vi(772), str(hostName), port2, vi(1)]))); sock.write(pk(vi(0))); });
+      sock.on('data', d => { got = Buffer.concat([got, d]); if (got.length > 8 && got.includes(Buffer.from('"version"')) || got.includes(Buffer.from('description'))) fin({ ok: true }); });
+      sock.on('error', e => fin({ ok: false, error: e.code === 'ECONNREFUSED' ? 'refused (nothing is forwarding the tunnel to this PC)' : e.code === 'ENOTFOUND' ? 'address not found' : e.message }));
+      sock.on('close', () => fin({ ok: got.length > 0, error: got.length ? '' : 'the connection was closed straight away' }));
+    });
+  }
+  async function reachCheck() {
+    P.reach = { state: 'checking' };
+    const r = await (o.pingAddress || pingAddress)(config.serverAddress);
+    P.reach = r.ok ? { state: 'ok' } : { state: 'fail', error: r.error };
+    log('Reach check ' + config.serverAddress + ': ' + (r.ok ? 'ok' : r.error));
+  }
+
   baton.on('state', s => {
     P.lastActive = Date.now();
+    if (s.phase === 'hosting' && P.lastPhase !== 'hosting') setTimeout(() => reachCheck().catch(() => {}), o.reachDelayMs != null ? o.reachDelayMs : 8000);
+    P.lastPhase = s.phase;
+    if (s.phase !== 'hosting') P.reach = null;
     if (s.phase === 'starting' || s.phase === 'hosting') startPlayit();
     else if (['off', 'lost', 'error'].includes(s.phase)) stopPlayit();
   });
@@ -119,7 +168,7 @@ function createPlayer(o) {
       ok: true, pid: process.pid, phase: s.phase, message: s.message, error: s.error, progress: s.progress, hosting: s.hosting,
       remote: s.remote, remoteErr: s.remoteErr, standby: s.standby, address: s.address, ramPlan: s.ramPlan, lastSync: s.lastSync,
       configured: s.configured, players: mc.players ? mc.players.size : 0, prep: P.prep, prepPct: P.prepPct,
-      tunnel: !!P.playit, tunnelErr: P.playitErr, name: host.name || '',
+      tunnel: !!P.playit || !!(P.tunnelVia && !P.playitErr && baton.phase === 'hosting'), tunnelErr: P.playitErr, tunnelVia: P.tunnelVia || '', reach: P.reach || null, port: host.port || null, version: 2, name: host.name || '',
     };
   };
   const routes = {
@@ -132,6 +181,7 @@ function createPlayer(o) {
       return view();
     },
     'POST /stop': async () => { baton.stopHosting().catch(e => log('Stop failed: ' + e.message)); await sleep(200); return view(); },
+    'POST /recheck': async () => { await reachCheck(); return view(); },
     'POST /request': async () => { await baton.requestHost(); return view(); },
     'POST /standby': async ({ body }) => { baton.setStandby(!!body.on); return view(); },
     'POST /quit': async () => { setTimeout(() => shutdown(), 50); return { ok: true }; },
