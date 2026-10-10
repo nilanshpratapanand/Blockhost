@@ -239,7 +239,7 @@ function runTask(title, fn) {
     broadcast('task', task);
     broadcast('state', snapshot());
   }).catch(err => {
-    task.done = true; task.error = err.message; task.code = err.code || null;
+    task.done = true; task.error = err.message; task.code = err.code || null; task.extra = err.accounts || null;
     mc.log(`[${title}] FAILED: ${err.message}`, 'error');
     broadcast('task', task);
     broadcast('state', snapshot());
@@ -744,6 +744,20 @@ const routes = {
   'GET /api/baton': () => ({ ...baton.snapshot(), code: config.batonCode || '', name: config.batonName || '', maxRamGB: config.batonMaxRamGB, solo: !config.batonCode }),
   'POST /api/baton/join': ({ body }) => { baton.join(String(body.code || '')); return { ok: true }; },
   'POST /api/baton/leave': () => { baton.leave(); return { ok: true }; },
+  // one button: log in to Cloudflare, deploy the coordinator, store the secret, create the group, upload the world
+  'POST /api/baton/setup': ({ body }) => {
+    if (config.batonCode) throw new Error('This PC is already in a group. Leave it first (Cloud Host > Group settings).');
+    if (mc.isRunning()) throw new Error('Stop the server first - the world is uploaded to the cloud once while it is not running.');
+    return runTask('Set up Cloud Host', async p => {
+      const { setup } = require('./lib/cloudsetup');
+      const r = await setup({ cloudDir: path.join(DASH_DIR, 'cloud'), log: p, accountId: body && body.accountId ? String(body.accountId) : '' });
+      p('Coordinator is live. Uploading your world for the first time...', 85);
+      const onState = s => { if (s.progress) p(s.message, 85 + Math.round(15 * s.progress.done / Math.max(1, s.progress.total))); };
+      baton.on('state', onState);
+      try { const u = await baton.seed(r.url, r.secret); return { ok: true, url: r.url, uploaded: true, version: u.version, files: u.uploaded }; }
+      finally { baton.off('state', onState); }
+    });
+  },
   'POST /api/baton/seed': ({ body }) => runTask('Upload world to the cloud', async p => {
     const onState = s => { if (s.progress) p(s.message, Math.round(100 * s.progress.done / Math.max(1, s.progress.total))); };
     baton.on('state', onState);

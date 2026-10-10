@@ -10,12 +10,12 @@
   pages.cloud = {
     title: 'Cloud Host', sub: 'No always-on PC needed: whoever starts the server hosts it, and the world follows',
     render(view, on) {
-      let b = null, info = null, testing = null, busy = false, showCode = false, secret = genSecret(), seedTask = null;
+      let b = null, info = null, testing = null, busy = false, showCode = false, secret = genSecret(), seedTask = null, accounts = null, setupRunning = false;
       const tick = [];
 
       const load = async () => { try { b = await api('/api/baton'); } catch (e) { toast(e.message, 'err'); } draw(); if (b && b.configured && !b.remote) refresh(); };
       const refresh = async () => { if (!b || !b.configured || busy) return; try { const s = await post('/api/baton/refresh'); b = { ...b, ...s }; draw(); } catch { /* offline */ } };
-      on(kind => { if (kind === 'baton' && S.baton) { b = { ...(b || {}), ...S.baton }; draw(); } if (kind === 'taskdone') load(); });
+      on(kind => { if (kind === 'baton' && S.baton) { b = { ...(b || {}), ...S.baton }; draw(); } if (kind === 'taskdone') { if (data && data.title === 'Set up Cloud Host') { setupRunning = false; accounts = data.code === 'ACCOUNT' && data.extra ? data.extra : null; } load(); } });
       tick.push(setInterval(refresh, 10000), setInterval(() => { if (b && b.hosting) draw(); }, 5000));
 
       const act = (id, fn) => { const el = $('#' + id, view); if (el) el.onclick = async () => { if (busy) return; busy = true; el.disabled = true; try { await fn(); } catch (e) { toast(e.message, 'err', 7000); } busy = false; await load(); }; };
@@ -135,19 +135,28 @@
               <button class="btn btn-primary" id="jcGo" style="margin-top:12px">Join group</button></div>
 
             <div class="card"><div class="card-h">${icn('crown', 18)}<h2>I'm the owner - create the group</h2></div>
-              <ol class="muted small" style="margin:0 0 6px 18px;padding:0;line-height:1.65">
-                <li>Make a free account at <a href="https://dash.cloudflare.com/sign-up" target="_blank" rel="noopener">cloudflare.com</a>. The default setup uses only the free Workers plan (R2 is optional).</li>
-                <li>Open a terminal in the <b>dashboard\\cloud</b> folder (needs <a href="https://nodejs.org" target="_blank" rel="noopener">Node.js</a>) and run these, in order:
-                  ${cmd('npx wrangler login')}${cmd('npx wrangler deploy')}${cmd('npx wrangler secret put GROUP_SECRET')}
-                  <div class="hint" style="margin-top:6px">When it asks for the secret, paste this one: <b class="mono" id="gsVal">${esc(secret)}</b> <button class="btn btn-ghost btn-sm" data-copy="${esc(secret)}">${icn('copy', 12)}</button></div></li>
-                <li>Paste the address <code>deploy</code> printed (ends with <b>workers.dev</b>):</li></ol>
-              <div class="field"><input class="input mono" id="cwUrl" placeholder="https://blockhost-baton.yourname.workers.dev"></div>
-              <button class="btn btn-primary" id="cwGo" style="margin-top:12px">${icn('upload', 14)}Upload my world &amp; create group</button>
-              <div class="muted small" style="margin-top:8px">The server must be stopped while the world uploads for the first time.</div></div>
+              <div class="muted small" style="margin-bottom:12px;line-height:1.6">One button does everything: it opens Cloudflare so you can press <b>Allow</b> once, puts the coordinator online on your free account, and uploads your world. No commands to type. You need a free <a href="https://dash.cloudflare.com/sign-up" target="_blank" rel="noopener">Cloudflare account</a> and <a href="https://nodejs.org" target="_blank" rel="noopener">Node.js</a> (you already have both if Blockhost runs).</div>
+              ${accounts ? `<div class="field"><label>Which Cloudflare account?</label><select class="input" id="cwAcc">${accounts.map(a => `<option value="${esc(a.id)}">${esc(a.name)}</option>`).join('')}</select></div>` : ''}
+              <button class="btn btn-primary" id="cwAuto" style="margin-top:6px;width:100%;justify-content:center;padding:13px 16px;font-size:15px" ${setupRunning ? 'disabled' : ''}>${icn('cloud', 16)}${setupRunning ? 'Setting up... follow the bar at the bottom' : 'Set it up for me'}</button>
+              <div class="muted small" style="margin-top:8px">Stop the server first. Takes about 2 minutes; a browser tab opens for the one-time Cloudflare login.</div>
+              <details style="margin-top:14px"><summary class="muted small" style="cursor:pointer">Advanced: do it by hand</summary>
+                <ol class="muted small" style="margin:10px 0 6px 18px;padding:0;line-height:1.65">
+                  <li>Open a terminal in the <b>dashboard\\cloud</b> folder (not the server folder) and run:
+                    ${cmd('npx wrangler login')}${cmd('npx wrangler deploy')}${cmd('npx wrangler secret put GROUP_SECRET')}
+                    <div class="hint" style="margin-top:6px">Paste this secret when asked: <b class="mono" id="gsVal">${esc(secret)}</b> <button class="btn btn-ghost btn-sm" data-copy="${esc(secret)}">${icn('copy', 12)}</button></div></li>
+                  <li>Paste the address <code>deploy</code> printed (ends with <b>workers.dev</b>):</li></ol>
+                <div class="field"><input class="input mono" id="cwUrl" placeholder="https://blockhost-baton.yourname.workers.dev"></div>
+                <button class="btn" id="cwGo" style="margin-top:10px">${icn('upload', 14)}Upload my world &amp; create group</button></details></div>
           </div></div>`;
         const g = id => $('#' + id, view);
         $$('[data-copy]', view).forEach(el => el.onclick = () => copyText(el.dataset.copy));
         act('jcGo', async () => { await post('/api/baton/join', { code: g('jcCode').value }); toast('Joined the group', 'ok'); });
+        act('cwAuto', async () => {
+          const sel = $('#cwAcc', view);
+          setupRunning = true; draw();
+          try { await post('/api/baton/setup', sel ? { accountId: sel.value } : {}); toast('Setting up - a Cloudflare tab may open. Follow the bar at the bottom.', 'info', 6000); }
+          catch (e) { setupRunning = false; throw e; }
+        });
         act('cwGo', async () => {
           const url = g('cwUrl').value.trim();
           if (!/^(https:\/\/|http:\/\/(localhost|127\.0\.0\.1))\S+$/.test(url)) throw new Error('Paste the https address printed by "npx wrangler deploy".');
