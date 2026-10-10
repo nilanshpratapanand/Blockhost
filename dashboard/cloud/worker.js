@@ -20,6 +20,7 @@ export class Lease {
       host: live ? s.host : null, lastHost: s.host ? s.host.name : null,
       expiresInMs: live ? s.expiresAt - now : 0,
       wanted: s.wanted && now - s.wanted.at < 30 * 60000 ? s.wanted : null, now,
+      roster: live && s.tele && Array.isArray(s.tele.players) ? s.tele.players.slice(0, 20) : [],
     };
   }
   async fetch(req) {

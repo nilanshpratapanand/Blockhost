@@ -442,3 +442,18 @@
 
   window.BH = { $, $$, esc, ic, fire, api, post, cmd, toast, modal, confirmBox, fmtBytes, fmtDur, fmtDate, ago, titleCase, avatar, mcFormat, stripMc, store, S, pages, startServer, stopServer, eulaModal, javaModal, sparkline, copyText, router, init };
 })();
+
+
+/* ---- theme switch (night camp / day camp) ---- */
+(function () {
+  const root = document.documentElement, sw = document.getElementById('themeSwitch');
+  if (!sw) return;
+  const paint = () => { const light = root.getAttribute('data-theme') === 'light'; sw.setAttribute('aria-checked', light ? 'true' : 'false'); const m = document.querySelector('meta[name=theme-color]'); if (m) m.content = light ? '#f6efe2' : '#0c0905'; };
+  sw.addEventListener('click', () => {
+    const next = root.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+    root.setAttribute('data-theme', next);
+    try { localStorage.setItem('bh-theme', next); } catch (e) {}
+    paint();
+  });
+  paint();
+})();

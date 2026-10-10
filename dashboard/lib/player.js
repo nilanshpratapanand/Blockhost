@@ -172,7 +172,7 @@ function createPlayer(o) {
     return {
       ok: true, pid: process.pid, phase: s.phase, message: s.message, error: s.error, progress: s.progress, hosting: s.hosting,
       remote: s.remote, remoteErr: s.remoteErr, standby: s.standby, address: s.address, ramPlan: s.ramPlan, lastSync: s.lastSync,
-      configured: s.configured, players: mc.players ? mc.players.size : 0, prep: P.prep, prepPct: P.prepPct,
+      configured: s.configured, players: mc.players ? mc.players.size : 0, roster: (mc.playerList ? mc.playerList() : []).map(p => p.name).slice(0, 20), prep: P.prep, prepPct: P.prepPct,
       tunnel: !!P.playit || !!(P.tunnelVia && !P.playitErr && baton.phase === 'hosting'), tunnelErr: P.playitErr, tunnelVia: P.tunnelVia || '', reach: P.reach || null, port: host.port || null, version: 2, name: host.name || '',
     };
   };

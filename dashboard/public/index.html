@@ -8,6 +8,8 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Pixelify+Sans:wght@500;700&family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<script>(function(){try{var t=localStorage.getItem('bh-theme');if(t!=='light'&&t!=='dark')t=matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';document.documentElement.setAttribute('data-theme',t)}catch(e){document.documentElement.setAttribute('data-theme','dark')}})()</script>
+<meta name="color-scheme" content="dark light">
 <link rel="stylesheet" href="/app.css">
 </head>
 <body class="state-offline">
@@ -36,6 +38,7 @@
       <p id="pageSub"></p>
     </div>
     <div class="top-actions">
+      <button class="theme-switch" id="themeSwitch" role="switch" aria-checked="false" aria-label="Day camp (light) theme" title="Switch between night camp and day camp"><svg class="moon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M10 1a7 7 0 1 0 5 11 6 6 0 0 1-5-11z"/></svg><svg class="sun" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="8" cy="8" r="3.2"/><path d="M8 0h1v3H8zM8 13h1v3H8zM0 8h3v1H0zM13 8h3v1h-3zM2.3 2.3l.7-.7 2.1 2.1-.7.7zM11.6 11.6l.7-.7 2.1 2.1-.7.7zM2.3 13.7l2.1-2.1.7.7-2.1 2.1zM11.6 4.4l2.1-2.1.7.7-2.1 2.1z"/></svg></button>
       <button class="address-chip" id="topAddress" title="Copy address"></button>
       <div class="state-pill" id="topState"><i></i><span>Offline</span></div>
     </div>
