@@ -9,15 +9,26 @@ options, backups, world tools, mod/pack kit, and Live Sync for friends.
 Start_Dashboard.bat      launcher (put next to server.jar)
 dashboard/               the app (server.js, lib/, public/)
 dashboard/config.example.json
-test/                    node --test test/backups-prune.test.js
+dashboard/cloud/          Cloud Host coordinator (Cloudflare Worker) + setup guide
+test/                    node --test test/*.test.js
 ```
 
 Copy this repo's `dashboard/` folder and `Start_Dashboard.bat` into your Minecraft server folder, then run the
 `.bat`. The dashboard opens at http://localhost:8765.
 
+## Highlights
+
+- **Server tuner** (Settings): audits JVM flags and heap, applies Aikar's G1 set validated against your real Java,
+  optional LZ4 chunk compression and simulation distance. Never touches view distance or visuals. One-click undo.
+- **Cloud Host** (no 24/7 PC needed): friends take turns hosting. Whoever starts playing becomes the host, the world
+  is synced through a free Cloudflare Worker, and the host hands off after the server has been idle (default 30 min).
+  RAM is sized to the host PC, capped at 4 GB. Setup: `dashboard/cloud/README.md`.
+- **Mod Guard**: reads installed mods, flags missing dependencies and client/server mismatches.
+- **Smart storage cleanup** for backups, and auto dependency install for mods.
+
 ## Keeping secrets out of git
 
-`.gitignore` excludes `dashboard/config.json`, `dashboard/sync-key.pem`, `Blockhost-Sync-*.bat`,
+`.gitignore` excludes `dashboard/config.json`, `dashboard/sync-key.pem`, `dashboard/baton-state.json`, `Blockhost-Sync-*.bat`,
 `server.properties` (contains the management-server secret), world data, backups and jars.
 Never commit those. If one leaks, rotate it: delete `sync-key.pem` and click "New access token" on the Live Sync
 page, regenerate the CurseForge key, and change `management-server-secret`.

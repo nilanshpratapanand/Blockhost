@@ -4,9 +4,19 @@
   "maxRam": "4G",
   "autoRestart": true,
   "backupsToKeep": 10,
+  "smartCleanup": true,
+  "autoMaxDays": 14,
+  "safetyDays": 7,
+  "backupMaxGB": 5,
   "useManagementApi": true,
   "rpcPort": 25585,
   "curseforgeKey": "",
   "syncEnabled": false,
-  "syncToken": ""
+  "syncToken": "",
+  "batonCode": "",
+  "batonName": "",
+  "batonIdleMin": 30,
+  "batonMaxRamGB": 4,
+  "batonMinHostGB": 6,
+  "batonStandby": false
 }

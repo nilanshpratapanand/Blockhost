@@ -34,18 +34,30 @@ async function test(key) {
   return { ok: true, game: r && r.data && r.data.name, length: k.length };
 }
 
-async function search(key, type, q, version, offset = 0) {
+const LOADER_NAME = { 1: 'forge', 3: 'liteloader', 4: 'fabric', 5: 'quilt', 6: 'neoforge' };
+
+async function search(key, type, q, version, offset = 0, loader = 'fabric', gv = null) {
   const p = new URLSearchParams({ gameId: GAME, classId: CLASS[type], searchFilter: q || '', sortField: 2, sortOrder: 'desc', pageSize: 24, index: Number(offset) || 0 });
   if (version) p.set('gameVersion', version);
-  if (type === 'mod') p.set('modLoaderType', FABRIC);
+  if (type === 'mod' && loader !== 'any') p.set('modLoaderType', FABRIC);
   const r = await cf(key, `/mods/search?${p}`);
   return {
     total: r.pagination ? r.pagination.totalCount : (r.data || []).length,
-    hits: (r.data || []).map(m => ({
-      id: 'cf:' + m.id, slug: m.slug, title: m.name, description: m.summary, author: (m.authors && m.authors[0] && m.authors[0].name) || '',
-      icon: m.logo && m.logo.thumbnailUrl, downloads: m.downloadCount, source: 'curseforge', page: m.links && m.links.websiteUrl,
-      canDownload: m.allowModDistribution !== false,
-    })),
+    hits: (r.data || []).map(m => {
+      const idx = m.latestFilesIndexes || [];
+      const vers = [...new Set(idx.map(i => i.gameVersion).filter(Boolean))];
+      const loaders = [...new Set(idx.map(i => LOADER_NAME[i.modLoader]).filter(Boolean))];
+      const fabricOk = idx.some(i => i.modLoader === FABRIC && (!gv || i.gameVersion === gv));
+      return {
+        id: 'cf:' + m.id, slug: m.slug, title: m.name, description: m.summary, author: (m.authors && m.authors[0] && m.authors[0].name) || '',
+        icon: m.logo && m.logo.thumbnailUrl, downloads: m.downloadCount, source: 'curseforge', page: m.links && m.links.websiteUrl,
+        canDownload: m.allowModDistribution !== false,
+        compat: { loaders, latest: vers.sort((a, b) => a.localeCompare(b, undefined, { numeric: true })).pop() || null,
+          version: gv && idx.length ? idx.some(i => i.gameVersion === gv) : null,
+          loader: type === 'mod' ? (loaders.length ? loaders.includes('fabric') : null) : null,
+          fits: type === 'mod' ? (idx.length ? fabricOk : null) : null },
+      };
+    }),
   };
 }
 

@@ -24,7 +24,7 @@
     title: 'Packs', sub: 'Texture packs, data packs and shaders from Modrinth',
     render(view, on) {
       let source = store.get('packSource', 'modrinth'), searchErr = null;
-      let tab = store.get('packTab', 'resourcepack'), q = '', any = false, results = null, offset = 0, total = 0, state = null, loading = false;
+      let tab = store.get('packTab', 'resourcepack'), q = '', any = store.get('packAny', true), anyLoader = store.get('packAnyLoader', true), results = null, offset = 0, total = 0, state = null, loading = false;
 
       const stateCard = () => {
         if (!state) return `<div class="card"><div class="skeleton" style="width:40%"></div></div>`;
@@ -66,17 +66,55 @@
         const chk = state.check;
         const checkCard = tab !== 'mod' || !state.kit.some(k => k.folder === 'mods') ? '' : `<div class="card"><div class="card-h"><h2>Mod check — will friends be able to join?</h2>${!chk ? '<span class="spinner"></span>' : chk.some(c => c.risk === 'breaks') ? '<span class="tag red">problem found</span>' : chk.some(c => c.risk === 'maybe') ? '<span class="tag gold">check these</span>' : '<span class="tag green">all client-only</span>'}</div>
           <div class="muted small">Your server is vanilla. Mods that add new blocks, mobs or items must also run on the server - on a vanilla server they cause <b>“Connection lost: Network Protocol Error”</b> when joining. Client-only mods (shaders, connected textures, CIT, particles, sounds) are fine.</div>
-          ${chk ? `<div class="list" style="margin-top:10px">${chk.filter(c => c.risk !== 'ok').map(c => `<div class="list-row"><span class="tag ${c.risk === 'breaks' ? 'red' : 'gold'}">${ic('alert')}${c.risk === 'breaks' ? 'breaks joining' : 'maybe'}</span><div class="grow"><b>${esc(c.title)}</b> <span class="sub">${esc(c.why)}</span></div><button class="btn btn-ghost btn-sm" data-rmkit="${esc(c.name)}" data-folder="mods">${ic('trash')}Remove</button></div>`).join('') || `<div class="muted small">${ic('check')} All ${chk.length} mods are client-only — they can't cause a protocol error.</div>`}</div>` : ''}</div>`;
-        return presetCard + checkCard + installerCard + `<div class="card"><div class="card-h"><h2>Player kit</h2><span class="tag purple">${state.kit.length} file${state.kit.length === 1 ? '' : 's'}</span><span class="spacer"></span>
+          ${chk ? `<div class="list" style="margin-top:10px">${chk.filter(c => c.risk !== 'ok').map(c => `<div class="list-row"><span class="tag ${c.risk === 'breaks' ? 'red' : 'gold'}">${ic('alert')}${c.risk === 'breaks' ? 'breaks joining' : 'maybe'}</span><div class="grow"><b>${esc(c.title)}</b> <span class="sub">${esc(c.why)}</span></div><button class="btn btn-ghost btn-sm" data-rmkit="${esc(c.name)}" data-folder="mods">${ic('trash')}Remove</button></div>`).join('') || `<div class="muted small">${ic('check').replace('<svg ', '<svg width="14" height="14" style="vertical-align:-2px" ')} All ${chk.length} mods are client-only — they can't cause a protocol error.</div>`}</div>` : ''}</div>`;
+        const gd = state.guard, gErr = gd ? gd.issues.filter(i => i.level === 'error') : [];
+        const guardCard = tab !== 'mod' || (gd && !gd.total) ? '' : `<div class="card"><div class="card-h"><h2>${ic('shield').replace('<svg ', '<svg width="16" height="16" style="vertical-align:-2px;color:var(--emerald);margin-right:6px" ')}Mod Guard</h2>${!gd ? '<span class="spinner"></span>' : gErr.length ? `<span class="tag red">${gErr.length} problem${gErr.length > 1 ? 's' : ''}</span>` : gd.issues.length ? `<span class="tag gold">${gd.issues.length} warning${gd.issues.length > 1 ? 's' : ''}</span>` : `<span class="tag green">all ${gd.total} mods compatible</span>`}<span class="spacer"></span>${gErr.some(i => i.fix) ? `<button class="btn btn-primary btn-sm" id="guardFixAll">${ic('check')}Fix all problems</button>` : ''}</div>
+          <div class="muted small">Looks inside every mod for what would crash the game: wrong loader (Forge/NeoForge instead of Fabric), wrong Minecraft version${gd && gd.gameVersion ? ' (yours is ' + esc(gd.gameVersion) + ')' : ''}, missing required libraries, mods that break each other, and duplicate copies. Bad mods are also <b>blocked automatically</b> when you try to add them.</div>
+          ${gd && gd.issues.length ? `<div class="list" style="margin-top:10px">${gd.issues.map((i, n) => `<div class="list-row"><span class="tag ${i.level === 'error' ? 'red' : 'gold'}">${ic('alert')}${i.level === 'error' ? 'problem' : 'warning'}</span><div class="grow"><b>${esc(i.title)}</b> <span class="sub">${esc(i.why)}</span></div>${i.fix ? `<button class="btn btn-ghost btn-sm" data-gfix="${n}">${i.fix.action === 'addDep' ? ic('plus') + 'Add ' + esc(i.fix.dep) : ic('trash') + 'Remove'}</button>` : ''}<button class="btn btn-ghost btn-sm" data-gign="${n}" title="I tested it and it works - never warn or block this mod again">Ignore</button></div>`).join('')}</div>` : ''}
+          ${gd ? `<details style="margin-top:12px"${state.guardOpen ? ' open' : ''} id="guardMore"><summary class="small muted" style="cursor:pointer">More tools: ignored mods, mark mods as incompatible, crash-log analyzer${gd.disabled && gd.disabled.length ? ', disabled server mods' : ''}</summary>
+            <div class="stack" style="margin-top:10px;gap:14px">
+              <div><div class="small"><b>Always allowed</b> <span class="dim">— mods you tested that work (never warned or blocked)</span></div>
+                <div class="row" style="gap:6px;flex-wrap:wrap;margin-top:6px">${gd.rules.allow.map(a => `<span class="tag green">${esc(a)} <a href="#" data-gunallow="${esc(a)}" title="Stop ignoring">×</a></span>`).join('') || '<span class="dim small">none yet</span>'}</div>
+                <form class="input-group" id="gAllowForm" style="margin-top:8px"><input class="input" id="gAllowIn" placeholder="mod id or Modrinth slug, e.g. chunky"><button class="btn btn-ghost">Allow</button></form></div>
+              <div><div class="small"><b>Known bad pairs</b> <span class="dim">— found two mods that crash together? Teach the guard once.</span></div>
+                ${gd.rules.pairs.map(p => `<div class="row small" style="gap:6px;margin-top:4px"><span class="tag red">${esc(p.bad)} + ${esc(p.other)}</span><a href="#" data-gunpair="${esc(p.bad)}|${esc(p.other)}">remove rule</a></div>`).join('')}
+                <form class="input-group" id="gPairForm" style="margin-top:8px"><select class="input" id="gPairA">${gd.mods.filter(m => m.id).map(m => `<option value="${esc(m.id)}">${esc(m.title || m.id)}</option>`).join('')}</select><select class="input" id="gPairB">${gd.mods.filter(m => m.id).map((m, n) => `<option value="${esc(m.id)}" ${n === 1 ? 'selected' : ''}>${esc(m.title || m.id)}</option>`).join('')}</select><button class="btn btn-ghost">Mark incompatible</button></form>
+                <div class="dim small">The first one is the one that gets removed by “Fix all”.</div></div>
+              <div><div class="small"><b>Crash-log analyzer</b> <span class="dim">— paste a crash report or latest.log (yours or a friend's)</span></div>
+                <textarea class="input mono" id="gCrash" rows="4" placeholder="Paste the crash report here…" style="margin-top:6px">${esc(state.guardText || '')}</textarea>
+                <div class="row" style="margin-top:6px"><button class="btn btn-ghost btn-sm" id="gAnalyze">${ic('search')}Find the culprit</button></div>
+                ${state.guardCrash ? (state.guardCrash.nothing ? '<div class="muted small" style="margin-top:8px">No mod names found in that text. Paste the full crash report (the part starting with “---- Minecraft Crash Report ----”).</div>' : `<div class="list" style="margin-top:8px">${state.guardCrash.suspects.map(s => `<div class="list-row"><span class="tag red">suspect</span><div class="grow"><b>${esc(s.title)}</b> <span class="sub">${esc(s.reasons.join('; '))}</span></div><button class="btn btn-ghost btn-sm" data-gcrm="${esc(s.name)}" data-gwhere="${esc(s.where)}">${ic('trash')}Remove</button></div>`).join('')}${state.guardCrash.unmatched.map(s => `<div class="list-row"><span class="tag gold">not installed</span><div class="grow"><b>${esc(s.id)}</b> <span class="sub">${esc(s.reasons.join('; '))}</span></div></div>`).join('')}${state.guardCrash.pairs.map(p => `<div class="list-row"><span class="tag purple">pair</span><div class="grow"><b>${esc(p[0])} + ${esc(p[1])}</b> <span class="sub">reported incompatible</span></div><button class="btn btn-ghost btn-sm" data-gpairadd="${esc(p[0])}|${esc(p[1])}">Remember</button></div>`).join('')}</div>`) : ''}</div>
+              ${gd.disabled && gd.disabled.length ? `<div><div class="small"><b>Disabled server mods</b> <span class="dim">— moved to <code>mods-disabled</code>, never deleted</span></div>${gd.disabled.map(f => `<div class="row small" style="gap:6px;margin-top:4px"><span class="mono">${esc(f)}</span><a href="#" data-grestore="${esc(f)}">Restore</a></div>`).join('')}</div>` : ''}
+            </div></details>` : ''}</div>`;
+        const mm = state.mods;
+        const modsCard = tab !== 'mod' || !mm || !mm.length ? '' : `<div class="card"><div class="card-h"><h2>Installed mods</h2><span class="tag purple">${mm.filter(m => m.enabled).length} on</span>${mm.some(m => !m.enabled) ? `<span class="tag">${mm.filter(m => !m.enabled).length} off</span>` : ''}</div>
+          <div class="muted small">Switch a single mod off to keep it without sending it to friends, or remove it. Libraries that were added automatically for a mod are removed when nothing needs them any more.</div>
+          <div class="list" style="margin-top:10px">${mm.map((m, n) => `<div class="list-row" style="${m.enabled ? '' : 'opacity:.55'}"><span class="switch" title="${m.enabled ? 'On - friends get this mod' : 'Off - kept here, not sent to friends'}"><input type="checkbox" data-mtoggle="${n}" ${m.enabled ? 'checked' : ''}><span></span></span>
+            <div class="grow"><b>${esc(m.title)}</b> ${m.version ? `<span class="sub">${esc(m.version)}</span>` : ''} ${m.auto ? '<span class="tag blue" title="Added automatically because another mod needs it">library</span>' : ''} ${m.requiredBy.length ? `<span class="tag" title="${esc(m.requiredBy.join(', '))}">needed by ${m.requiredBy.length}</span>` : ''}</div>
+            <button class="icon-btn danger" title="Remove" data-mrm="${n}">${ic('trash')}</button></div>`).join('')}</div></div>`;
+        return presetCard + modsCard + guardCard + checkCard + installerCard + `<div class="card"><div class="card-h"><h2>Player kit</h2><span class="tag purple">${state.kit.length} file${state.kit.length === 1 ? '' : 's'}</span><span class="spacer"></span>
             <a class="btn btn-primary btn-sm ${state.kit.length ? '' : 'hidden'}" href="/api/packs/kit/download">${ic('download')}Download kit (.zip)</a></div>
           <label class="dropzone" id="kitDrop" style="margin-bottom:12px;padding:16px">${ic('upload')}<div><b>Upload a file you downloaded yourself</b> (PlanetMinecraft, CurseForge, a creator's website…)</div><div class="dim small">Drop .zip texture packs / shaders or Fabric .jar mods here. They travel inside the installer zip. Share only with friends - many packs are personal-use only.</div><input type="file" id="kitFile" multiple accept=".zip,.jar" hidden></label>
           <form class="input-group" id="linkForm" style="margin-bottom:12px"><input class="input" id="linkIn" placeholder="Paste a Modrinth / CurseForge / PlanetMinecraft link, or just a name (e.g. Fresh Leaves)"><button class="btn btn-primary">${ic('search')}Find & add</button></form>
-          <div class="list">${state.kit.length ? state.kit.map(k => `<div class="list-row"><div class="avatar sm" style="color:var(--gold)">${ic(k.folder === 'shaderpacks' ? 'sun' : k.folder === 'mods' ? 'box' : 'image')}</div><div class="grow"><b>${esc(k.name)}</b> <span class="sub">${k.folder} · ${fmtBytes(k.size)}${k.local ? ' · uploaded' : ''}</span></div><button class="icon-btn danger" data-rmkit="${esc(k.name)}" data-folder="${k.folder}">${ic('trash')}</button></div>`).join('') : '<div class="muted small">Add shaders (or texture packs) below — they go into one zip you can send to friends.</div>'}</div></div>`;
+          <div class="list">${state.kit.length ? state.kit.map(k => `<div class="list-row"><div class="avatar sm" style="color:var(--gold)">${ic(k.folder === 'shaderpacks' ? 'sun' : k.folder === 'mods' ? 'box' : 'image')}</div><div class="grow"><b>${esc(k.name)}</b> ${k.auto ? '<span class="tag blue" title="Added automatically because another mod needs it. It is removed automatically once nothing needs it.">required by another mod</span>' : ''} <span class="sub">${k.folder} · ${fmtBytes(k.size)}${k.local ? ' · uploaded' : ''}</span></div><button class="icon-btn danger" data-rmkit="${esc(k.name)}" data-folder="${k.folder}">${ic('trash')}</button></div>`).join('') : '<div class="muted small">Add shaders (or texture packs) below — they go into one zip you can send to friends.</div>'}</div></div>`;
       };
 
+      const LOADER_LABEL = { fabric: 'Fabric', quilt: 'Quilt', forge: 'Forge', neoforge: 'NeoForge', liteloader: 'LiteLoader', rift: 'Rift' };
+      const compatInfo = h => {
+        const c = h.compat || {}, gv = state && state.gameVersion;
+        const ld = (c.loaders || []).map(l => LOADER_LABEL[l] || l).join(' · ');
+        if (tab === 'mod') {
+          if (c.loader === false || c.fits === false && c.loader === false) return { blocked: true, tag: `<span class="tag red" title="No Fabric build exists, so it can't run in your Fabric kit">${esc(ld || 'Other loader')} only</span>`, note: `Not a Fabric mod — can't run on your Fabric ${esc(gv || '')} setup. Open its page to see its own loader.`, ld, latest: c.latest };
+          if (c.fits === false || c.version === false) return { blocked: true, tag: `<span class="tag gold" title="Fabric build exists, but not for ${esc(gv || 'your version')}">for MC ${esc(c.latest || 'older')}</span>`, note: `No Fabric build for Minecraft ${esc(gv || 'your version')} yet — newest is ${esc(c.latest || 'older')}.`, ld, latest: c.latest };
+          return { blocked: false, tag: c.version === true || c.fits === true ? `<span class="tag green">fits your server</span>` : '', note: '', ld, latest: c.latest };
+        }
+        if (c.version === false) return { blocked: false, tag: `<span class="tag gold" title="Newest listed version is ${esc(c.latest || 'older')} — it may still work">for MC ${esc(c.latest || 'older')}</span>`, note: '', ld, latest: c.latest };
+        return { blocked: false, tag: '', note: '', ld, latest: c.latest };
+      };
       const resultCard = h => {
+        const ci = compatInfo(h);
         const kitBtn = l => `<button class="btn ${l ? 'btn-primary' : 'btn-ghost'} btn-sm" data-kit="${esc(h.id)}">${ic('plus')}${l || 'Kit'}</button>`;
-        const btns = h.canDownload === false
+        const btns = h.canDownload === false || ci.blocked
           ? `<a class="btn btn-ghost btn-sm" href="${esc(h.page)}" target="_blank" rel="noopener">${ic('external')}Get it on the site</a>`
           : tab === 'resourcepack' ? `<button class="btn btn-primary btn-sm" data-use="${esc(h.id)}" data-name="${esc(h.title)}">${ic('check')}Use on server</button>${kitBtn()}`
             : tab === 'datapack' ? `<button class="btn btn-success btn-sm" data-dp="${esc(h.id)}">${ic('download')}Install</button>`
@@ -88,7 +126,8 @@
             <div style="min-width:0;flex:1"><div class="pack-title">${esc(h.title)}</div><div class="dim small">by ${esc(h.author)} · ${ic('download').replace('<svg ', '<svg width="11" height="11" style="vertical-align:-1px" ')} ${fmtNum(h.downloads)}</div></div>
             <span class="tag ${h.source === 'curseforge' ? 'gold' : 'green'}">${h.source === 'curseforge' ? 'CurseForge' : 'Modrinth'}</span>
           </div>
-          <p class="pack-desc">${esc(h.description)}</p>${warn}
+          <p class="pack-desc">${esc(h.description)}</p>
+          <div class="row" style="gap:6px;flex-wrap:wrap">${ci.tag}${ci.ld ? `<span class="tag">${esc(ci.ld)}</span>` : ''}${ci.latest && !ci.tag.includes('for MC') ? `<span class="tag">MC ${esc(ci.latest)}</span>` : ''}</div>${ci.note ? `<div class="dim small">${ci.note}</div>` : ''}${warn}
           ${h.canDownload === false ? '<div class="dim small">Author only allows downloads on their page - download it there, then upload it to the kit.</div>' : ''}
           <div class="row between"><a class="dim small" href="${esc(h.page || ('https://modrinth.com/' + tab + '/' + h.slug))}" target="_blank" rel="noopener">${ic('external').replace('<svg ', '<svg width="12" height="12" style="vertical-align:-2px" ')} Open page</a><div class="row" style="gap:6px">${btns}</div></div>
         </div>`;
@@ -106,11 +145,12 @@
             <div class="row"><div class="seg" id="srcSeg">${[['modrinth', 'Modrinth'], ['curseforge', 'CurseForge'], ['all', 'Both']].map(([k, l]) => `<button data-src="${k}" class="${source === k ? 'on' : ''}">${l}</button>`).join('')}</div>
               <a class="dim small" href="https://www.planetminecraft.com/${tab === 'resourcepack' ? 'texture-packs' : tab === 'mod' ? 'mods' : tab === 'datapack' ? 'data-packs' : 'texture-packs'}/?keywords=${encodeURIComponent(q)}" target="_blank" rel="noopener" title="PlanetMinecraft has no download API - find it there, download, then upload to the kit">${ic('external').replace('<svg ', '<svg width="12" height="12" style="vertical-align:-2px" ')} PlanetMinecraft</a>
               <span class="tag blue">${ic('box')}for ${esc((state && state.gameVersion) || 'your version')}</span>
-              <label class="row small muted" style="gap:6px"><span class="switch"><input type="checkbox" id="pkAny" ${any ? 'checked' : ''}><span></span></span>Any version</label></div>
+              <label class="row small muted" style="gap:6px"><span class="switch"><input type="checkbox" id="pkAny" ${any ? 'checked' : ''}><span></span></span>Any version</label>
+              ${tab === 'mod' ? `<label class="row small muted" style="gap:6px" title="Show Forge / NeoForge / Quilt mods too, not just Fabric"><span class="switch"><input type="checkbox" id="pkLoader" ${anyLoader ? 'checked' : ''}><span></span></span>Any loader</label>` : ''}</div>
           </div>
           <div class="pack-grid" id="pkRes">${results === null ? Array(6).fill('<div class="card"><div class="skeleton" style="width:60%"></div><div class="skeleton" style="margin-top:12px"></div></div>').join('')
             : searchErr ? `<div class="card empty" style="grid-column:1/-1">${ic('key')}<div>${esc(searchErr)}</div><a class="btn btn-primary btn-sm" href="#/settings">Open Settings</a></div>`
-            : results.length ? results.map(resultCard).join('') : `<div class="card empty" style="grid-column:1/-1">${ic('search')}<div>Nothing found${any ? '' : ` for ${esc(state && state.gameVersion)} yet — new versions take a while. Try “Any version”.`}</div></div>`}</div>
+            : results.length ? results.map(resultCard).join('') : `<div class="card empty" style="grid-column:1/-1">${ic('search')}<div>Nothing found${any ? '' : ` for ${esc(state && state.gameVersion)} yet — new versions take a while. Try “Any version”.`}${tab === 'mod' && !anyLoader ? ' Or switch on “Any loader” to also see Forge / NeoForge mods.' : ''}</div></div>`}</div>
           ${results && results.length < total ? `<div style="text-align:center"><button class="btn btn-ghost" id="pkMore">${loading ? '<span class="spinner"></span>' : ''}Load more</button></div>` : ''}
         </div>`;
         bind();
@@ -119,10 +159,39 @@
       function bind() {
         $$('[data-t]', view).forEach(b => b.onclick = () => { tab = b.dataset.t; store.set('packTab', tab); results = null; offset = 0; draw(); search(); if (tab === 'shader' || tab === 'mod') loadState(); });
         $('#pkForm').onsubmit = e => { e.preventDefault(); q = $('#pkQ').value.trim(); results = null; offset = 0; draw(); search(); };
-        $('#pkAny').onchange = e => { any = e.target.checked; results = null; offset = 0; draw(); search(); };
+        $('#pkAny').onchange = e => { any = e.target.checked; store.set('packAny', any); results = null; offset = 0; draw(); search(); };
+        const pl = $('#pkLoader'); if (pl) pl.onchange = e => { anyLoader = e.target.checked; store.set('packAnyLoader', anyLoader); results = null; offset = 0; draw(); search(); };
         const more = $('#pkMore'); if (more) more.onclick = () => { offset += 24; search(true); };
+        const gfa = $('#guardFixAll'); if (gfa) gfa.onclick = () => post('/api/packs/guard/fix', { all: true }).catch(e => toast(e.message, 'err'));
+        const gmore = $('#guardMore'); if (gmore) gmore.ontoggle = () => { state.guardOpen = gmore.open; };
+        const reload = () => api('/api/packs/guard').then(g => { state.guard = g; draw(); }).catch(() => {});
+        const act = (p, o) => api(p, o).then(reload).catch(e => toast(e.message, 'err'));
+        $$('[data-gign]', view).forEach(b => b.onclick = () => { const i = state.guard.issues[Number(b.dataset.gign)]; state.guardOpen = true; act('/api/packs/guard/allow', { method: 'POST', body: { id: i.modId || i.mod } }); });
+        $$('[data-gunallow]', view).forEach(a => a.onclick = e => { e.preventDefault(); act('/api/packs/guard/allow?id=' + encodeURIComponent(a.dataset.gunallow), { method: 'DELETE' }); });
+        $$('[data-gunpair]', view).forEach(a => a.onclick = e => { e.preventDefault(); const [x, y] = a.dataset.gunpair.split('|'); act(`/api/packs/guard/pair?bad=${encodeURIComponent(x)}&other=${encodeURIComponent(y)}`, { method: 'DELETE' }); });
+        $$('[data-grestore]', view).forEach(a => a.onclick = e => { e.preventDefault(); act('/api/packs/guard/restore', { method: 'POST', body: { file: a.dataset.grestore } }); });
+        const af = $('#gAllowForm'); if (af) af.onsubmit = e => { e.preventDefault(); const v = $('#gAllowIn').value.trim(); if (v) { state.guardOpen = true; act('/api/packs/guard/allow', { method: 'POST', body: { id: v } }); } };
+        const pf = $('#gPairForm'); if (pf) pf.onsubmit = e => { e.preventDefault(); state.guardOpen = true; act('/api/packs/guard/pair', { method: 'POST', body: { bad: $('#gPairA').value, other: $('#gPairB').value } }); };
+        $$('[data-gpairadd]', view).forEach(b => b.onclick = () => { const [x, y] = b.dataset.gpairadd.split('|'); state.guardOpen = true; act('/api/packs/guard/pair', { method: 'POST', body: { bad: x, other: y, why: 'Reported incompatible in a crash log.' } }); });
+        const an = $('#gAnalyze'); if (an) an.onclick = async () => { state.guardText = $('#gCrash').value; state.guardOpen = true; try { state.guardCrash = await post('/api/packs/guard/analyze', { text: state.guardText }); } catch (e) { toast(e.message, 'err'); } draw(); };
+        $$('[data-gcrm]', view).forEach(b => b.onclick = () => { state.guardOpen = true; post('/api/packs/guard/fix', { fixes: [{ action: 'remove', file: b.dataset.gcrm, where: b.dataset.gwhere }] }).catch(e => toast(e.message, 'err')); });
+        $$('[data-gfix]', view).forEach(b => b.onclick = () => { const i = state.guard.issues[Number(b.dataset.gfix)]; post('/api/packs/guard/fix', { fixes: [i.fix] }).catch(e => toast(e.message, 'err')); });
         $$('[data-use]', view).forEach(b => b.onclick = () => useOnServer({ id: b.dataset.use, name: b.dataset.name }));
-        $$('[data-kit]', view).forEach(b => b.onclick = () => post('/api/packs/kit', { type: tab, id: b.dataset.kit, any }).catch(e => toast(e.message, 'err')));
+        $$('[data-kit]', view).forEach(b => b.onclick = () => tab === 'mod' ? planAndAdd(b.dataset.kit) : post('/api/packs/kit', { type: tab, id: b.dataset.kit, any }).catch(e => toast(e.message, 'err')));
+        $$('[data-mtoggle]', view).forEach(inp => inp.onchange = async () => {
+          const m = state.mods[Number(inp.dataset.mtoggle)];
+          try {
+            if (inp.checked) { await post('/api/packs/mods/enable', { name: m.name }); return; }
+            if (m.requiredBy.length && !(await confirmBox({ title: `Switch off ${m.title}?`, text: `<b>${esc(m.requiredBy.join(', '))}</b> need${m.requiredBy.length === 1 ? 's' : ''} it and will stop working until it is back on. Mod Guard will flag them.`, ok: 'Switch off', danger: true }))) { inp.checked = true; return; }
+            await post('/api/packs/mods/disable', { name: m.name }); loadState();
+          } catch (e) { toast(e.message, 'err'); inp.checked = !inp.checked; }
+        });
+        $$('[data-mrm]', view).forEach(b => b.onclick = async () => {
+          const m = state.mods[Number(b.dataset.mrm)], cascade = m.requiredBy.length > 0;
+          if (!(await confirmBox({ title: `Remove ${m.title}?`, text: cascade ? `<b>${esc(m.requiredBy.join(', '))}</b> need${m.requiredBy.length === 1 ? 's' : ''} it, so ${m.requiredBy.length === 1 ? 'that mod is' : 'those mods are'} removed too.` : 'It is deleted from the kit. Libraries only it needed are removed as well.', ok: cascade ? 'Remove all' : 'Remove', danger: true }))) return;
+          try { const r = await api(`/api/packs/mods?name=${encodeURIComponent(m.name)}${cascade ? '&cascade=1' : ''}`, { method: 'DELETE' }); toast(`Removed ${r.removed.length} mod${r.removed.length > 1 ? 's' : ''}`, 'ok'); } catch (e) { toast(e.message, 'err'); }
+          loadState();
+        });
         $$('[data-dp]', view).forEach(b => b.onclick = () => {
           if (!S.snap.hasJar) return toast('Create the server first.', 'err');
           post('/api/packs/datapack', { id: b.dataset.dp, any }).catch(e => toast(e.message, 'err'));
@@ -259,6 +328,27 @@
         }, true);
       }
 
+      async function planAndAdd(id) {
+        let plan; try { plan = await api('/api/packs/mod/plan?id=' + encodeURIComponent(id)); } catch (e) { return toast(e.message, 'err'); }
+        const flat = []; const walk = (n, d) => { flat.push({ n, d }); n.deps.forEach(c => walk(c, d + 1)); }; walk(plan, 0);
+        const depBad = flat.some(x => x.d > 0 && !x.n.ok), topBad = !plan.ok;
+        modal(`<h3>Add “${esc(plan.title)}”</h3>
+          <p class="muted small">${flat.length > 1 ? 'This mod needs other mods to work. Here is exactly what will be installed:' : 'This mod has no required mods.'}</p>
+          <div class="list">${flat.map(({ n, d }) => `<div class="list-row" style="padding-left:${d * 18}px"><span class="tag ${!n.ok ? 'red' : n.installed ? '' : d ? 'blue' : 'green'}">${!n.ok ? 'not available' : n.installed ? 'already added' : d ? 'required' : 'this mod'}</span><div class="grow"><b>${esc(n.title)}</b>${!n.ok ? ` <span class="sub">${esc(n.reason || '')}</span>` : ''}</div></div>`).join('')}</div>
+          ${flat.length > 1 ? `<label class="row" style="margin-top:12px"><span class="switch"><input type="checkbox" id="pmDeps" checked><span></span></span><span><b>Also install the required mods</b> <span class="muted small">(recommended)</span></span></label>` : ''}
+          <div id="pmWarn" class="small" style="margin-top:8px"></div>
+          <div class="modal-actions"><button class="btn btn-ghost" data-close>Cancel</button><button class="btn btn-primary" id="pmGo">${ic('plus')}Add</button></div>`, (m, close) => {
+          const cb = $('#pmDeps', m);
+          const sync = () => {
+            const deps = cb ? cb.checked : true;
+            $('#pmGo', m).disabled = topBad || (deps && depBad);
+            $('#pmWarn', m).innerHTML = topBad ? `<span style="color:var(--redstone)">This mod can't be installed on your setup.</span>` : deps && depBad ? `<span style="color:var(--gold)">A required mod isn't available for your setup, so installing would fail. Switch off “Also install the required mods” to add only this one — it may not start without them.</span>` : !deps && flat.length > 1 ? `<span style="color:var(--gold)">Required mods are skipped. Mod Guard will warn you if something is missing.</span>` : '';
+          };
+          if (cb) cb.onchange = sync; sync();
+          $('#pmGo', m).onclick = () => { const noDeps = cb ? !cb.checked : false; close(); post('/api/packs/kit', { type: 'mod', id, any, noDeps }).catch(e => toast(e.message, 'err')); };
+        });
+      }
+
       function useOnServer(o) {
         modal(`<h3>${o.custom ? 'Use your own texture pack' : 'Use “' + esc(o.name) + '” on the server'}</h3>
           <p>${o.custom ? 'Paste a <b>direct download</b> link to the .zip. Blockhost downloads it once to check it and compute the checksum.' : 'Blockhost downloads it once to verify it, then tells players to load it when they join.'}</p>
@@ -281,7 +371,7 @@
         loading = true;
         try {
           searchErr = null;
-          const r = await api(`/api/packs/search?type=${tab}&q=${encodeURIComponent(q)}&offset=${offset}&source=${source}${any ? '&any=1' : ''}`);
+          const r = await api(`/api/packs/search?type=${tab}&q=${encodeURIComponent(q)}&offset=${offset}&source=${source}${any ? '&any=1' : ''}${tab === 'mod' && anyLoader ? '&loader=any' : ''}`);
           results = append && results ? results.concat(r.hits) : r.hits; total = r.total;
         } catch (e) { results = results || []; if (e.code === 'CF_KEY') searchErr = e.message; else toast('Search failed: ' + e.message, 'err'); }
         loading = false; draw();
@@ -290,6 +380,8 @@
         try { state = await api('/api/packs/state'); } catch { /* ignore */ }
         draw();
         if (state && (tab === 'shader' || tab === 'mod')) api('/api/packs/installer/check').then(c => { state.installer = c; draw(); }).catch(() => {});
+        if (state && tab === 'mod') api('/api/packs/mods').then(r => { state.mods = r.mods; draw(); }).catch(() => {});
+        if (state && tab === 'mod') api('/api/packs/guard').then(g => { state.guard = g; draw(); }).catch(() => {});
         if (state && tab === 'mod') api('/api/packs/kit/check').then(c => { state.check = c; draw(); }).catch(() => { state.check = []; draw(); });
       }
 

@@ -1,0 +1,17 @@
+# Optional: store the world in Cloudflare R2 instead (10 GB free, but Cloudflare may ask for a payment method to enable R2).
+# Use with:  npx wrangler deploy -c wrangler.r2.toml
+name = "blockhost-baton"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+[[durable_objects.bindings]]
+name = "LEASE"
+class_name = "Lease"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Lease"]
+
+[[r2_buckets]]
+binding = "WORLD"
+bucket_name = "blockhost-world"

@@ -272,9 +272,26 @@
   pages.backups = {
     title: 'Backups', sub: 'Snapshots of your world — safe to make while the server runs',
     render(view, on) {
-      let list = null, cfg = null;
+      let list = null, cfg = null, stor = null, cleaning = false;
+      const kindTag = k => k === 'manual' ? '<span class="tag green" title="You made it - never deleted automatically">yours</span>' : k === 'safety' ? '<span class="tag gold" title="Made before a reset/update/restore - expires once the world is fine">safety copy</span>' : '<span class="tag" title="Scheduled backup - older ones are removed automatically">auto</span>';
+      const storageCard = () => {
+        if (!stor) return `<div class="card"><div class="skeleton" style="width:40%"></div></div>`;
+        const u = stor.usage, pol = stor.policy, todo = [...stor.junk, ...stor.retention], freeable = todo.reduce((a, b) => a + b.size, 0);
+        return `<div class="card"><div class="card-h"><h2>Storage</h2><span class="tag ${freeable > 50e6 ? 'gold' : 'green'}">${fmtBytes(u.total)} used</span>${freeable ? `<span class="tag purple">${fmtBytes(freeable)} can be freed</span>` : '<span class="tag green">nothing to clean</span>'}<span class="spacer"></span>
+            <button class="btn btn-primary btn-sm ${todo.length ? '' : 'hidden'}" id="cleanNow" ${cleaning ? 'disabled' : ''}>${cleaning ? '<span class="spinner"></span>' : ic('trash')}Clean up now</button></div>
+          <div class="row small muted" style="gap:14px"><span><b>${fmtBytes(u.backups)}</b> real backups</span><span><b>${fmtBytes(u.temp)}</b> temporary leftovers</span><span><b>${fmtBytes(u.broken)}</b> failed backups</span></div>
+          ${todo.length ? `<div class="list" style="margin-top:10px">${todo.slice(0, 8).map(t => `<div class="list-row"><span class="tag ${t.why === 'retention' ? 'gold' : 'red'}">${t.why === 'temp' ? 'leftover' : t.why === 'broken' ? 'failed' : 'old'}</span><div class="grow"><b class="mono" style="font-size:12.5px">${esc(t.name)}</b> <span class="sub">${esc(t.reason)} · ${fmtBytes(t.size)}</span></div></div>`).join('')}${todo.length > 8 ? `<div class="dim small">…and ${todo.length - 8} more</div>` : ''}</div>` : ''}
+          <div class="row between" style="margin-top:12px"><label class="row small" style="gap:8px"><span class="switch"><input type="checkbox" id="smartOn" ${pol.smart ? 'checked' : ''}><span></span></span><span><b>Smart cleanup</b> <span class="muted">— runs by itself after every backup, at launch and every 30 min</span></span></label></div>
+          <div class="row small muted" style="gap:14px;margin-top:8px;${pol.smart ? '' : 'opacity:.5'}">
+            <label class="row" style="gap:6px">Auto backups expire after <input class="input mono" id="autoDays" type="number" min="1" max="365" value="${pol.autoDays}" style="width:64px;height:28px"> days</label>
+            <label class="row" style="gap:6px">Safety copies after <input class="input mono" id="safeDays" type="number" min="1" max="365" value="${pol.safetyDays}" style="width:64px;height:28px"> days</label>
+            <label class="row" style="gap:6px">Total cap <input class="input mono" id="capGB" type="number" min="0" max="500" step="1" value="${pol.maxGB}" style="width:64px;height:28px"> GB (0 = off)</label></div>
+          <div class="dim small" style="margin-top:8px">Your own named backups are never deleted automatically. The newest backup and the newest safety copy are always kept.${u.overCap ? ' <b style="color:var(--gold)">Your own backups alone are over the cap - delete some below.</b>' : ''}</div>
+          ${stor.strays && stor.strays.length ? `<div class="dim small" style="margin-top:8px">Big archives in the server folder (not managed here — delete them yourself if you don't need them): ${stor.strays.map(s => `<b class="mono">${esc(s.name)}</b> ${fmtBytes(s.size)}`).join(', ')}</div>` : ''}</div>`;
+      };
       const draw = () => {
         view.innerHTML = `<div class="stack">
+          ${storageCard()}
           <div class="grid g-2">
             <div class="card"><div class="card-h"><h2>Create a backup</h2></div>
               <form class="input-group" id="bkForm"><input class="input" id="bkLabel" placeholder="Label, e.g. before-nether-trip" maxlength="40"><button class="btn btn-primary">${ic('archive')}Back up now</button></form>
@@ -282,11 +299,11 @@
             <div class="card"><div class="card-h"><h2>Automatic backups</h2></div>
               <div class="row between"><span class="muted small">Every</span><div class="seg" id="autoSeg">${[[0, 'Off'], [30, '30m'], [60, '1h'], [180, '3h'], [360, '6h'], [720, '12h'], [1440, '24h']].map(([m, l]) => `<button data-m="${m}" class="${cfg && Number(cfg.autoBackupMinutes) === m ? 'on' : ''}">${l}</button>`).join('')}</div></div>
               <div class="row between" style="margin-top:12px"><span class="muted small">Keep the newest automatic backups</span><input class="input mono" id="keepN" type="number" min="1" max="200" value="${cfg ? cfg.backupsToKeep : 10}" style="width:90px;height:32px"></div>
-              <div class="dim small" style="margin-top:8px">Only runs while the server is online. Manual backups are never deleted automatically.</div></div>
+              <div class="dim small" style="margin-top:8px">Only runs while the server is online, and skips itself when nothing changed. Your own backups are never deleted automatically.</div></div>
           </div>
           <div class="card"><div class="card-h"><h2>Saved backups</h2>${list ? `<span class="tag">${list.length}</span><span class="sub">${fmtBytes(list.reduce((a, b) => a + b.size, 0))} total</span>` : ''}</div>
             <div class="list">${!list ? '<div class="skeleton"></div>' : list.length ? list.map(b => `<div class="list-row"><div class="avatar sm" style="color:var(--amethyst-2)">${ic('archive')}</div>
-              <div class="grow"><b>${esc(b.label)}</b> <span class="sub">${fmtDate(b.created)} · ${ago(b.created)} · ${fmtBytes(b.size)}</span></div>
+              <div class="grow"><b>${esc(b.label)}</b> ${kindTag(bkKind(b.label))} <span class="sub">${fmtDate(b.created)} · ${ago(b.created)} · ${fmtBytes(b.size)}</span></div>
               <button class="btn btn-ghost btn-sm" data-rs="${esc(b.name)}">${ic('restart')}Restore</button>
               <a class="icon-btn" title="Download" href="/api/backups/download?name=${encodeURIComponent(b.name)}">${ic('download')}</a>
               <button class="icon-btn danger" title="Delete" data-del="${esc(b.name)}">${ic('trash')}</button></div>`).join('')
@@ -300,6 +317,10 @@
           try { await api('/api/backups?name=' + encodeURIComponent(b.dataset.del), { method: 'DELETE' }); toast('Backup deleted'); load(); } catch (e) { toast(e.message, 'err'); }
         });
         $$('[data-rs]', view).forEach(b => b.onclick = () => restore(b.dataset.rs));
+        const cn = $('#cleanNow'); if (cn) cn.onclick = async () => { cleaning = true; draw(); try { const r = await post('/api/backups/cleanup'); toast(r.deleted.length ? `Freed ${fmtBytes(r.freed)} (${r.deleted.length} item${r.deleted.length > 1 ? 's' : ''})${r.failed.length ? ' - ' + r.failed.length + ' still in use, will retry' : ''}` : 'Nothing to clean', 'ok'); } catch (e) { toast(e.message, 'err'); } cleaning = false; load(); };
+        const so = $('#smartOn'); if (so) so.onchange = e => saveCfg({ smartCleanup: e.target.checked });
+        const num = (id, key, d) => { const el = $(id); if (el) el.onchange = e => saveCfg({ [key]: Math.max(0, parseFloat(e.target.value) || d) }); };
+        num('#autoDays', 'autoMaxDays', 14); num('#safeDays', 'safetyDays', 7); num('#capGB', 'backupMaxGB', 5);
       };
       function restore(name) {
         modal(`<h3>Restore this backup?</h3><p>Your current world is replaced with <b class="mono">${esc(name)}</b>. A safety backup of the current world is made first.</p>
@@ -315,8 +336,9 @@
           };
         });
       }
+      const bkKind = l => /^(auto-)?before-/.test(l) ? 'safety' : l.startsWith('auto-') ? 'auto' : 'manual';
       async function saveCfg(patch) { try { cfg = (await post('/api/config', { config: { ...cfg, ...patch } })).config; toast('Saved'); draw(); } catch (e) { toast(e.message, 'err'); } }
-      const load = () => Promise.all([api('/api/backups'), api('/api/config')]).then(([b, c]) => { list = b.backups; cfg = c.config; draw(); }).catch(e => toast(e.message, 'err'));
+      const load = () => Promise.all([api('/api/backups'), api('/api/config'), api('/api/backups/storage').catch(() => null)]).then(([b, c, s]) => { list = b.backups; cfg = c.config; stor = s; draw(); }).catch(e => toast(e.message, 'err'));
       draw(); load();
       on(k => { if (k === 'taskdone') load(); });
     },
@@ -470,7 +492,7 @@
   pages.settings = {
     title: 'Settings', sub: 'How Blockhost runs your server',
     render(view) {
-      let cfg = null, java = null, dirty = false;
+      let cfg = null, java = null, dirty = false, perfA = null; const perfSel = {};
       const ramOpts = () => { const tot = S.stats && S.stats.memTotal ? Math.floor(S.stats.memTotal / 1073741824) : 16; const o = []; for (let g = 1; g <= Math.max(2, tot - 1); g++) o.push(g + 'G'); return o; };
       const draw = () => {
         if (!cfg) { view.innerHTML = '<div class="card"><div class="skeleton" style="width:30%"></div></div>'; return; }
@@ -490,6 +512,24 @@
 
           <div class="card"><div class="card-h">${ic('key').replace('<svg ', '<svg width="18" height="18" ')}<h2>CurseForge library</h2></div>
             <div class="field"><label>CurseForge API key (free)</label><div class="input-group"><input class="input mono" type="password" data-c="curseforgeKey" id="cfKeyIn" value="${esc(cfg.curseforgeKey)}" placeholder="paste key here (starts with $2a$10$)"><button type="button" class="btn btn-ghost" id="cfTest">${ic('check')}Test key</button></div><div id="cfRes" class="small" style="margin-top:6px"></div><div class="hint">Adds CurseForge to the pack search and as a backup source. Get a free key: <a href="https://console.curseforge.com/" target="_blank" rel="noopener">console.curseforge.com</a> → sign in → API keys → copy. Modrinth works without a key.</div></div></div>
+
+          <div class="card" id="tuneCard"><div class="card-h">${ic('memory').replace('<svg ', '<svg width="18" height="18" ')}<h2>Server tuner</h2><span class="sub grow" style="text-align:right">Faster, smoother - same looks</span></div>
+            ${!perfA ? '<div class="skeleton" style="width:40%"></div>' : `
+            <div class="list">${perfA.items.filter(i => i.kind !== 'kept').map(i => {
+              const can = !!i.apply, on = can && i.kind === 'safe' && perfSel[i.id] !== false || perfSel[i.id] === true;
+              return `<div class="list-row" style="align-items:flex-start;gap:12px">
+                ${can ? `<label class="switch" style="margin-top:2px;flex:none"><input type="checkbox" data-pf="${i.id}" ${on ? 'checked' : ''}><span></span></label>` : `<span style="width:40px;flex:none;color:var(--emerald)">${i.state === 'good' ? ic('check').replace('<svg ', '<svg width="18" height="18" ') : ''}</span>`}
+                <div class="grow" style="min-width:0;white-space:normal;overflow-wrap:anywhere"><b>${esc(i.title)}</b> <span class="tag ${i.state === 'good' ? 'green' : i.kind === 'optional' ? 'blue' : i.kind === 'info' ? '' : 'gold'}" style="margin-left:6px">${i.state === 'good' ? 'Already good' : i.kind === 'optional' ? 'Optional' : i.kind === 'info' ? 'Info' : 'Recommended'}</span>
+                  <div class="muted small" style="white-space:normal">${esc(i.why)}</div>
+                  <div class="small mono" style="margin-top:4px;opacity:.8">${esc(i.current)} → ${esc(i.recommended)}</div></div></div>`;
+            }).join('')}</div>
+            <details style="margin-top:10px"><summary class="muted small" style="cursor:pointer">Left untouched on purpose (protects visuals and your world)</summary>
+              <div class="list" style="margin-top:6px">${perfA.items.filter(i => i.kind === 'kept').map(i => `<div class="list-row"><div class="grow"><b class="mono">${esc(i.title)}</b> <span class="muted small">= ${esc(i.current)}</span><div class="muted small">${esc(i.why)}</div></div></div>`).join('')}</div></details>
+            <div class="row" style="margin-top:12px;gap:8px">
+              <button class="btn btn-primary btn-sm" id="pfApply">${ic('check')}Apply selected</button>
+              ${perfA.canUndo ? `<button class="btn btn-ghost btn-sm" id="pfUndo">Undo last tuning</button>` : ''}
+              <span class="muted small grow">Backed up first. Takes effect on the next server restart.</span></div>`}
+          </div>
 
           <div class="card"><div class="card-h">${ic('memory').replace('<svg ', '<svg width="18" height="18" ')}<h2>Performance</h2></div>
             <div class="grid g-3">
@@ -520,6 +560,17 @@
           cfg[k] = el.type === 'checkbox' ? el.checked : (el.type === 'number' ? Number(el.value) : el.value);
           dirty = true; $('#cfgBar').classList.remove('hidden');
         }));
+        $$('[data-pf]', view).forEach(el => el.addEventListener('change', () => { perfSel[el.dataset.pf] = el.checked; }));
+        const pa = $('#pfApply'); if (pa) pa.onclick = async () => {
+          const ids = $$('[data-pf]', view).filter(e => e.checked && !e.disabled).map(e => e.dataset.pf);
+          if (!ids.length) return toast('Nothing selected', 'err');
+          pa.disabled = true;
+          try { const r = await post('/api/perf/apply', { ids }); toast('Tuned: ' + r.applied.length + ' change' + (r.applied.length > 1 ? 's' : '') + (r.droppedFlags && r.droppedFlags.length ? ' (skipped ' + r.droppedFlags.length + ' flag your Java does not know)' : '')); Object.keys(perfSel).forEach(k => delete perfSel[k]); await load(); if (r.restartNeeded) restartPrompt('Tuning applied'); }
+          catch (e) { toast(e.message, 'err', 6000); pa.disabled = false; }
+        };
+        const pu = $('#pfUndo'); if (pu) pu.onclick = async () => {
+          try { const r = await post('/api/perf/undo', {}); toast('Tuning undone'); await load(); if (r.restartNeeded) restartPrompt('Tuning undone'); } catch (e) { toast(e.message, 'err'); }
+        };
         const ct = $('#cfTest'); if (ct) ct.onclick = async () => {
           const out = $('#cfRes'); ct.disabled = true; out.innerHTML = '<span class="spinner"></span> Asking CurseForge…';
           try { const r = await post('/api/curseforge/test', { key: $('#cfKeyIn').value }); out.innerHTML = `<span style="color:var(--emerald)">${ic('check').replace('<svg ', '<svg width="12" height="12" ')} Key works (${esc(r.game || 'Minecraft')}).</span> ${dirty ? 'Press <b>Save</b> below.' : ''}`; }
@@ -532,7 +583,7 @@
           try { cfg = (await post('/api/config', { config: cfg })).config; dirty = false; draw(); restartPrompt('Settings saved'); } catch (e) { toast(e.message, 'err'); }
         };
       };
-      const load = () => Promise.all([api('/api/config'), api('/api/java')]).then(([c, j]) => { cfg = c.config; java = j; draw(); }).catch(e => toast(e.message, 'err'));
+      const load = () => Promise.all([api('/api/config'), api('/api/java'), api('/api/perf').catch(() => null)]).then(([c, j, pf]) => { cfg = c.config; java = j; perfA = pf; draw(); }).catch(e => toast(e.message, 'err'));
       draw(); load();
     },
   };

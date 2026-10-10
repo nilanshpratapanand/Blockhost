@@ -10,6 +10,7 @@ const { fetchJSON, download, moveFile } = require('./util');
 const { createZip, extractZip } = require('./archive');
 const { readZipEntry } = require('./zipread');
 const cf = require('./curseforge');
+const guard = require('./modguard');
 
 const API = process.env.BLOCKHOST_MODRINTH || 'https://api.modrinth.com/v2';
 const TYPES = {
@@ -18,6 +19,7 @@ const TYPES = {
   shader: { facet: 'project_type:shader', loaders: ['iris', 'optifine'] },
   mod: { facet: 'project_type:mod', extra: ['categories:fabric'], loaders: ['fabric'] },
 };
+const KNOWN_LOADERS = ['fabric', 'quilt', 'forge', 'neoforge', 'liteloader', 'rift'];
 const KIT_FOLDER = { shader: 'shaderpacks', resourcepack: 'resourcepacks', mod: 'mods' };
 const MAX_PACK = 250 * 1024 * 1024; // Minecraft's limit for server resource packs
 
@@ -37,12 +39,12 @@ class Packs {
 
   cfKey() { const k = cf.cleanKey(this.getConfig().curseforgeKey); if (!k) { const e = new Error('Add your free CurseForge API key in Settings to search CurseForge.'); e.code = 'CF_KEY'; throw e; } return k; }
 
-  async search(type, q, version, offset = 0, source = 'modrinth') {
-    if (source === 'curseforge') return cf.search(this.cfKey(), type, q, version, offset);
+  async search(type, q, version, offset = 0, source = 'modrinth', loader = 'fabric') {
+    if (source === 'curseforge') return cf.search(this.cfKey(), type, q, version, offset, loader, this.gameVersion());
     if (source === 'all') {
       const [a, b] = await Promise.all([
-        this.search(type, q, version, offset, 'modrinth').catch(() => ({ total: 0, hits: [] })),
-        (this.getConfig().curseforgeKey ? cf.search(this.cfKey(), type, q, version, offset) : Promise.resolve({ total: 0, hits: [] })).catch(() => ({ total: 0, hits: [] })),
+        this.search(type, q, version, offset, 'modrinth', loader).catch(() => ({ total: 0, hits: [] })),
+        (this.getConfig().curseforgeKey ? cf.search(this.cfKey(), type, q, version, offset, loader, this.gameVersion()) : Promise.resolve({ total: 0, hits: [] })).catch(() => ({ total: 0, hits: [] })),
       ]);
       const seen = new Set(), hits = [];
       const norm = t => String(t).toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -52,22 +54,43 @@ class Packs {
       return { total: a.total + b.total, hits };
     }
     const t = TYPES[type]; if (!t) throw new Error('Unknown pack type');
+    const anyLoader = loader === 'any';
     const facets = [[t.facet]];
-    if (t.extra) for (const e of t.extra) facets.push([e]);
-    if (type === 'mod') facets.push(['client_side:required', 'client_side:optional']);
+    if (t.extra && !anyLoader) for (const e of t.extra) facets.push([e]);
+    if (type === 'mod' && !anyLoader) facets.push(['client_side:required', 'client_side:optional']);
     if (version) facets.push([`versions:${version}`]);
+    const gv = this.gameVersion();
     const url = `${API}/search?limit=24&offset=${Number(offset) || 0}&index=${q ? 'relevance' : 'downloads'}`
       + `&query=${encodeURIComponent(q || '')}&facets=${encodeURIComponent(JSON.stringify(facets))}`;
     const r = await fetchJSON(url);
     return {
       total: r.total_hits,
-      hits: (r.hits || []).map(h => ({
-        id: h.project_id, slug: h.slug, title: h.title, description: h.description, author: h.author,
-        icon: h.icon_url, downloads: h.downloads, versions: h.versions || [], categories: h.categories || [],
-        clientSide: h.client_side || null, serverSide: h.server_side || null, source: 'modrinth',
-        page: `https://modrinth.com/${h.project_type || type}/${h.slug}`, canDownload: true,
-      })),
+      hits: (r.hits || []).map(h => {
+        const cats = h.categories || [], vers = h.versions || [];
+        const loaders = cats.filter(c => KNOWN_LOADERS.includes(c));
+        return {
+          id: h.project_id, slug: h.slug, title: h.title, description: h.description, author: h.author,
+          icon: h.icon_url, downloads: h.downloads, versions: vers, categories: cats,
+          clientSide: h.client_side || null, serverSide: h.server_side || null, source: 'modrinth',
+          page: `https://modrinth.com/${h.project_type || type}/${h.slug}`, canDownload: true,
+          compat: { loaders, latest: vers[vers.length - 1] || null,
+            version: gv && vers.length ? vers.includes(gv) : null,
+            loader: type === 'mod' ? (loaders.length ? loaders.includes('fabric') : null) : null },
+        };
+      }),
     };
+  }
+
+  /** Required dependencies of a Modrinth version (some only name a version, so resolve those to their project). */
+  async requiredDeps(v) {
+    const out = [];
+    for (const d of v.dependencies || []) {
+      if (d.dependency_type !== 'required') continue;
+      let pid = d.project_id;
+      if (!pid && d.version_id) { try { pid = (await fetchJSON(`${API}/version/${encodeURIComponent(d.version_id)}`)).project_id; } catch { /* unresolved */ } }
+      if (pid && !out.includes(pid)) out.push(pid);
+    }
+    return out;
   }
 
   /** Newest version file of a project for our game version (or any version if allowAny). */
@@ -78,12 +101,20 @@ class Packs {
     let list = version ? await fetchJSON(`${base}&game_versions=${encodeURIComponent(JSON.stringify([version]))}`) : [];
     let exact = true;
     if (!list.length && allowAny && type !== 'mod') { list = await fetchJSON(base); exact = false; }  // mods must match exactly or the game crashes
+    if (!list.length && type === 'mod') {
+      try {
+        const p = await fetchJSON(`${API}/project/${encodeURIComponent(id)}`);
+        const ld = p.loaders || [], gvs = p.game_versions || [];
+        if (ld.length && !ld.includes('fabric')) throw Object.assign(new Error(`"${p.title}" is only made for ${ld.join(', ')} - there is no Fabric version, so it can't run in this kit/server. Download it from its page only if you switch the server to that loader.`), { final: true });
+        if (version) throw Object.assign(new Error(`"${p.title}" has no Fabric build for Minecraft ${version} yet (newest supported: ${gvs[gvs.length - 1] || 'unknown'}). Mods must match the exact version.`), { final: true });
+      } catch (e) { if (e.final) throw e; }
+    }
     if (!list.length) throw new Error(version ? (type === 'mod' ? `This mod isn't released for Minecraft ${version} yet (mods must match the exact version).` : `No ${type} build for Minecraft ${version}. Tick "any version" to try an older one.`) : 'No downloadable files.');
     const v = list[0];
     const f = v.files.find(x => x.primary) || v.files[0];
     if (!f) throw new Error('This version has no files.');
     return { url: f.url, filename: f.filename, sha1: f.hashes && f.hashes.sha1, size: f.size, versionNumber: v.version_number, gameVersions: v.game_versions, exact,
-      deps: (v.dependencies || []).filter(d => d.dependency_type === 'required' && d.project_id).map(d => d.project_id) };
+      deps: await this.requiredDeps(v) };
   }
 
   // ------------------------------------------------------------- server resource pack
@@ -208,10 +239,10 @@ class Packs {
 
   // ------------------------------------------------------------- player kit (shaders etc.)
   listKit() {
-    const out = [];
+    const out = [], man = this.kitManifest();
     for (const sub of ['shaderpacks', 'resourcepacks', 'mods']) {
       const d = path.join(this.kitDir, sub);
-      try { for (const f of fs.readdirSync(d)) out.push({ folder: sub, name: f, size: fs.statSync(path.join(d, f)).size }); } catch { /* none */ }
+      try { for (const f of fs.readdirSync(d)) out.push({ folder: sub, name: f, size: fs.statSync(path.join(d, f)).size, auto: !!(man.find(e => e.folder === sub && e.name === f) || {}).autoDep }); } catch { /* none */ }
     }
     return out;
   }
@@ -251,15 +282,16 @@ class Packs {
     return f ? { url: f.url, filename: path.basename(f.filename), sha1: f.hashes && f.hashes.sha1, version: list[0].version_number } : null;
   }
 
-  async addToKit(type, id, allowAny, progress, _seen, force) {
+  async addToKit(type, id, allowAny, progress, _seen, force, ctx, opts) {
     const folder = KIT_FOLDER[type]; if (!folder) throw new Error('Unknown kit type');
+    if (type === 'mod' && !ctx) return this.installModWithDeps(id, allowAny, progress, force, opts || {});   // mods always go through the dependency installer
     const seen = _seen || new Set();
     if (seen.has(id)) return { file: null }; seen.add(id);
     const f = await this.bestFile(type, id, this.gameVersion(), allowAny);
     let info = {};
     if (String(id).startsWith('cf:')) info = { slug: f.slug, title: f.title };
     else { try { info = await fetchJSON(`${API}/project/${encodeURIComponent(id)}`); } catch { /* optional */ } }
-    if (type === 'mod' && info.server_side === 'required' && !force) {
+    if (type === 'mod' && info.server_side === 'required' && !force && !(ctx && ctx.depth > 0) && !this.guardRules().allow.map(x => x.toLowerCase()).includes(String(info.slug || '').toLowerCase())) {
       const e = new Error(`"${info.title || id}" adds new content (blocks/mobs/items) and must also run on the server. On your vanilla server it makes friends get "Network Protocol Error" when joining - so it was NOT added.`);
       e.code = 'SERVER_MOD'; throw e;
     }
@@ -267,25 +299,180 @@ class Packs {
     await fsp.mkdir(d, { recursive: true });
     const safe = path.basename(f.filename).replace(/[^\w.\-+ ]/g, '_');
     // replace an older file of the same project
-    for (const old of this.kitManifest().filter(e => e.projectId === id && e.folder === folder && e.name !== safe)) await fsp.rm(path.join(d, old.name), { force: true });
     progress(`Downloading ${safe}...`, 10);
     const got = await download(f.url, path.join(d, safe), pct => progress(null, 10 + Math.round(pct * 0.85)), cf.isCfUrl(f.url) ? { 'x-api-key': this.cfKey() } : null);
     if (f.sha1 && got !== f.sha1) { await fsp.rm(path.join(d, safe), { force: true }); throw new Error('Checksum mismatch - download corrupted.'); }
+    if (type === 'mod' && !force) {   // Mod Guard: never let a wrong-loader / wrong-version / conflicting jar into the kit
+      const bad = this.guardCandidate(safe);
+      if (bad) { await fsp.rm(path.join(d, safe), { force: true }); const e = new Error(`Mod Guard blocked ${safe}: ${bad}`); e.code = 'GUARD'; throw e; }
+    }
+    for (const old of this.kitManifest().filter(e => e.projectId === id && e.folder === folder && e.name !== safe)) {
+      if (ctx) ctx.st.removeLater.push({ folder, name: old.name }); else await fsp.rm(path.join(d, old.name), { force: true });   // inside an install the old file is only dropped once everything succeeded
+    }
     const man = this.kitManifest().filter(e => !(e.folder === folder && (e.name === safe || e.projectId === id)));
     man.push({ folder, name: safe, url: f.url, sha1: got, size: f.size, projectId: id, slug: info.slug || null, title: info.title || null,
-      serverSide: info.server_side || null });
+      serverSide: info.server_side || null, autoDep: !!(ctx && ctx.depth > 0) || undefined, depIds: (f.deps && f.deps.length) ? f.deps : undefined });
     this.saveKitManifest(man);
-    const added = [safe];
-    if (type === 'mod') {
+    const title = info.title || safe;
+    if (ctx) ctx.st.added.push({ folder, name: safe, title, dep: ctx.depth > 0 });
+    if (type === 'mod' && ctx && !ctx.st.noDeps) {
       for (const dep of f.deps) {
-        if (this.kitManifest().some(e => e.projectId === dep)) continue;
-        progress(`Adding required dependency...`);
-        try { const r = await this.addToKit('mod', dep, false, progress, seen); if (r.added) added.push(...r.added); }
-        catch (e) { progress(`Dependency ${dep} not available for ${this.gameVersion()}: ${e.message}`); }
+        if (this.kitManifest().some(e => e.projectId === dep) || ctx.st.skip.has(dep)) continue;
+        progress(`Adding required mod for ${title}...`);
+        try { await this.addToKit('mod', dep, false, progress, seen, force, { st: ctx.st, depth: ctx.depth + 1, parent: title }); }
+        catch (e) {
+          if (force) { progress(`Skipped a required mod of ${title}: ${e.message}`); continue; }
+          if (e.code === 'DEP') throw e;
+          const err = new Error(`“${title}” needs another mod that can't be installed (${e.message}) - so nothing was added.`); err.code = 'DEP'; throw err;
+        }
       }
     }
-    progress(`Added ${added.join(', ')} to the player kit.`, 100);
-    return { file: safe, added, serverSide: info.server_side || null };
+    return { file: safe, title, added: [safe], serverSide: info.server_side || null };
+  }
+
+  /** Installs a mod PLUS everything it needs, as one all-or-nothing step: required mods first-class (Modrinth/CurseForge
+   *  dependency data, then what the jars themselves declare), Mod Guard on every file, rollback if any piece fails. */
+  async installModWithDeps(id, allowAny, progress, force, opts = {}) {
+    const snapshot = this.kitManifest();
+    const st = { added: [], removeLater: [], skip: new Set(), noDeps: !!opts.noDeps };
+    const seen = new Set();
+    try {
+      const top = await this.addToKit('mod', id, allowAny, progress, seen, force, { st, depth: opts.asDep ? 1 : 0, parent: opts.parent || null });
+      // pass 2: what the downloaded jars themselves say they need (covers CurseForge, uploads, thin Modrinth metadata)
+      const tried = new Set();
+      for (let pass = 0; pass < 6 && !force && !st.noDeps; pass++) {
+        const mine = new Set(st.added.map(a => a.name));
+        const need = this.guardScan().issues.filter(i => i.where === 'kit' && mine.has(i.mod) && (i.code === 'missing-dep' || i.code === 'dep-version') && !tried.has(i.code + ':' + (i.fix ? i.fix.dep : i.dep)));
+        if (!need.length) break;
+        for (const i of need) {
+          const dep = i.fix ? i.fix.dep : i.dep; tried.add(i.code + ':' + dep);
+          progress(`Adding required mod “${dep}”...`);
+          try {
+            const proj = await this.findDepProject(dep);
+            await this.addToKit('mod', proj.id, false, progress, seen, force, { st, depth: 1, parent: top.title });
+          } catch (e) {
+            if (i.code === 'dep-version') { progress(`Couldn't update ${dep}: ${e.message}`); continue; }
+            if (e.code === 'DEP') throw e;
+            const err = new Error(`“${top.title || id}” needs “${dep}”, which can't be installed (${e.message}) - so nothing was added.`); err.code = 'DEP'; throw err;
+          }
+        }
+      }
+      for (const o of st.removeLater) await fsp.rm(path.join(this.kitDir, o.folder, o.name), { force: true });
+      for (const a of st.added) await this.guardDropOlderCopies(a.name, progress);
+      const deps = st.added.filter(a => a.dep && a.name !== top.file).map(a => a.title);
+      progress(deps.length ? `Added ${top.title} + ${deps.length} required mod${deps.length > 1 ? 's' : ''}: ${deps.join(', ')}.` : `Added ${top.file || top.title} to the player kit.`, 100);
+      return { file: top.file, added: st.added.map(a => a.name), deps, serverSide: top.serverSide };
+    } catch (e) {
+      for (const a of st.added.slice().reverse()) {
+        if (snapshot.some(x => x.folder === a.folder && x.name === a.name)) continue;      // it was already there before - keep it
+        await fsp.rm(path.join(this.kitDir, a.folder, a.name), { force: true }).catch(() => {});
+      }
+      this.saveKitManifest(snapshot);
+      throw e;
+    }
+  }
+
+  // ------------------------------------------------------------- manage single mods
+  offDir() { return path.join(this.kitDir, 'mods-off'); }
+  offManifest() { try { return JSON.parse(fs.readFileSync(path.join(this.kitDir, 'kit-off.json'), 'utf8')); } catch { return []; } }
+  saveOffManifest(l) { fs.mkdirSync(this.kitDir, { recursive: true }); fs.writeFileSync(path.join(this.kitDir, 'kit-off.json'), JSON.stringify(l, null, 2)); }
+
+  /** Installed mods for the manager: switched on (in the kit) and switched off (parked in mods-off, never shipped). */
+  listMods() {
+    const kit = this.guardScan().mods.filter(m => m.where === 'kit'), man = this.kitManifest();
+    const BUILT = ['minecraft', 'java', 'fabricloader', 'fabric-loader', 'mixinextras'];
+    const mods = kit.map(m => {
+      const e = man.find(x => x.folder === 'mods' && x.name === m.name) || {};
+      const requiredBy = kit.filter(o => o !== m && (o.needs || []).some(n => !BUILT.includes(n) && (m.provides || []).includes(n))).map(o => o.title || o.id || o.name);
+      return { name: m.name, title: e.title || m.title || m.id || m.name, version: m.version, enabled: true, auto: !!e.autoDep, requiredBy };
+    });
+    const off = this.offManifest().filter(e => fs.existsSync(path.join(this.offDir(), e.name))).map(e => ({ name: e.name, title: e.title || e.name, version: null, enabled: false, auto: !!e.autoDep, requiredBy: [] }));
+    return [...mods, ...off].sort((a, b) => String(a.title).localeCompare(String(b.title)));
+  }
+  /** Enabled mods that need `name`. */
+  modDependents(name) {
+    const kit = this.guardScan().mods.filter(m => m.where === 'kit');
+    const me = kit.find(m => m.name === name); if (!me) return [];
+    const BUILT = ['minecraft', 'java', 'fabricloader', 'fabric-loader', 'mixinextras'];
+    return kit.filter(o => o !== me && (o.needs || []).some(n => !BUILT.includes(n) && (me.provides || []).includes(n))).map(o => ({ name: o.name, title: o.title || o.id || o.name }));
+  }
+  async removeMod(name, opts = {}) {
+    const base = path.basename(String(name));
+    if (this.offManifest().some(e => e.name === base)) {
+      await fsp.rm(path.join(this.offDir(), base), { force: true });
+      this.saveOffManifest(this.offManifest().filter(e => e.name !== base));
+      return { ok: true, removed: [base] };
+    }
+    const direct = this.modDependents(base);
+    if (direct.length && !opts.cascade) { const e = new Error(`${direct.map(d => d.title).join(', ')} need${direct.length === 1 ? 's' : ''} this mod.`); e.code = 'HAS_DEPENDENTS'; throw e; }
+    const order = [];
+    const walk = n => { for (const d of this.modDependents(n)) if (d.name !== base && !order.includes(d.name)) { order.push(d.name); walk(d.name); } };
+    if (opts.cascade) walk(base);
+    const removed = [];
+    for (const n of [...order, base]) { await this.removeFromKit('mods', n); removed.push(n); }   // removeFromKit also drops libraries nothing needs any more
+    return { ok: true, removed };
+  }
+  async disableMod(name) {
+    const base = path.basename(String(name));
+    const man = this.kitManifest(), e = man.find(x => x.folder === 'mods' && x.name === base);
+    if (!fs.existsSync(path.join(this.kitDir, 'mods', base))) throw new Error('That mod is not switched on.');
+    await fsp.mkdir(this.offDir(), { recursive: true });
+    await fsp.rename(path.join(this.kitDir, 'mods', base), path.join(this.offDir(), base));
+    this.saveKitManifest(man.filter(x => !(x.folder === 'mods' && x.name === base)));
+    this.saveOffManifest([...this.offManifest().filter(x => x.name !== base), e || { folder: 'mods', name: base, local: true }]);
+    await this.pruneOrphanDeps().catch(() => {});
+    return { ok: true };
+  }
+  async enableMod(name, progress = () => {}) {
+    const base = path.basename(String(name));
+    const off = this.offManifest(), e = off.find(x => x.name === base) || { folder: 'mods', name: base, local: true };
+    const from = path.join(this.offDir(), base), to = path.join(this.kitDir, 'mods', base);
+    if (!fs.existsSync(from)) throw new Error('That mod is not switched off.');
+    await fsp.mkdir(path.dirname(to), { recursive: true });
+    await fsp.rename(from, to);
+    const bad = this.guardCandidate(base);
+    if (bad) { await fsp.rename(to, from); const err = new Error(`Mod Guard: ${bad}`); err.code = 'GUARD'; throw err; }
+    this.saveKitManifest([...this.kitManifest().filter(x => !(x.folder === 'mods' && x.name === base)), e]);
+    this.saveOffManifest(off.filter(x => x.name !== base));
+    const warnings = [];
+    for (const dep of e.depIds || []) {      // libraries that were removed while it was off come back by their remembered project
+      if (this.kitManifest().some(x => x.projectId === dep)) continue;
+      try { progress('Re-adding a required mod...'); await this.installModWithDeps(dep, false, progress, false, { asDep: true }); } catch (err) { warnings.push(err.message); }
+    }
+    for (const i of this.guardScan().issues.filter(i => i.code === 'missing-dep' && i.mod === base && i.where === 'kit')) {
+      try { progress(`Adding required mod “${i.fix.dep}”...`); await this.guardAddDep(i.fix.dep, progress); } catch (err) { warnings.push(err.message); }
+    }
+    progress(warnings.length ? `Switched on, but: ${warnings.join(' ')}` : `Switched on ${e.title || base}.`, 100);
+    return { ok: true, warnings };
+  }
+  /** What adding this mod would pull in (shown before installing, so the host can decide). */
+  async planMod(id, depth = 0, seen = new Set()) {
+    seen.add(id);
+    const node = { id, title: String(id), ok: true, installed: this.kitManifest().some(e => e.projectId === id), serverSide: null, deps: [] };
+    let f = null;
+    try { f = await this.bestFile('mod', id, this.gameVersion(), false); } catch (e) { node.ok = false; node.reason = e.message; }
+    if (String(id).startsWith('cf:')) node.title = (f && f.title) || node.title;
+    else { try { const p = await fetchJSON(`${API}/project/${encodeURIComponent(id)}`); node.title = p.title || node.title; node.serverSide = p.server_side || null; } catch { /* keep id */ } }
+    if (f && depth < 3) for (const d of f.deps) if (!seen.has(d)) node.deps.push(await this.planMod(d, depth + 1, seen));
+    return node;
+  }
+
+  /** Mods that were only installed because another mod needed them, and that nothing needs any more, are removed. */
+  async pruneOrphanDeps(progress = () => {}) {
+    for (let pass = 0; pass < 5; pass++) {
+      const auto = this.kitManifest().filter(e => e.folder === 'mods' && e.autoDep);
+      if (!auto.length) return;
+      const kit = this.guardScan().mods.filter(m => m.where === 'kit');
+      const orphans = auto.filter(e => {
+        const m = kit.find(x => x.name === e.name); if (!m) return false;
+        const mine = new Set(m.provides || []);
+        return !kit.some(o => o !== m && (o.needs || []).some(n => mine.has(n)));
+      });
+      if (!orphans.length) return;
+      for (const o of orphans) { await fsp.rm(path.join(this.kitDir, 'mods', o.name), { force: true }); progress(`Removed ${o.title || o.name} (no mod needs it any more)`); }
+      const gone = new Set(orphans.map(o => o.name));
+      this.saveKitManifest(this.kitManifest().filter(e => !(e.folder === 'mods' && gone.has(e.name))));
+    }
   }
 
   /** Which kit mods can break joining a VANILLA server ("Network Protocol Error")? */
@@ -305,12 +492,123 @@ class Packs {
       if (ss === 'required') { risk = 'breaks'; why = 'Modrinth says it must also be installed on the server (adds blocks/mobs/items).'; }
       else if (env === 'client' || ss === 'unsupported') { risk = 'ok'; why = 'Client-only mod.'; }
       else if (SAFE.test(e.slug || modId || e.name)) { risk = 'ok'; why = 'Known client-safe mod/library.'; }
-      else if (env === '*' || env === null) { risk = 'maybe'; why = 'Not marked as client-only. If friends get "Network Protocol Error", remove this one first.'; }
+      else if (env === '*' || env === null) { risk = 'ok'; why = 'Not marked as client-only - fine unless friends actually get a Network Protocol Error.'; }
       out.push({ name: e.name, title: e.title || modId || e.name, risk, why, serverSide: ss, environment: env });
     }
     if (changed) this.saveKitManifest(man);
     const order = { breaks: 0, maybe: 1, ok: 2 };
     return out.sort((a, b) => order[a.risk] - order[b.risk]);
+  }
+
+  // ------------------------------------------------------------- Mod Guard
+  modDirs() {
+    const out = [{ dir: path.join(this.kitDir, 'mods'), kind: 'kit' }];
+    const sd = path.join(this.dir, 'mods');
+    if (fs.existsSync(sd)) out.push({ dir: sd, kind: 'server' });
+    return out;
+  }
+  rulesFile() { return path.join(this.kitDir, 'guard-rules.json'); }
+  guardRules() {
+    try { const r = JSON.parse(fs.readFileSync(this.rulesFile(), 'utf8')); return { allow: Array.isArray(r.allow) ? r.allow : [], pairs: Array.isArray(r.pairs) ? r.pairs : [] }; } catch { return { allow: [], pairs: [] }; }
+  }
+  saveGuardRules(r) { fs.mkdirSync(this.kitDir, { recursive: true }); fs.writeFileSync(this.rulesFile(), JSON.stringify(r, null, 2)); }
+  guardAllow(id) {
+    const v = String(id || '').trim().toLowerCase(); if (!v) throw new Error('Which mod?');
+    const r = this.guardRules(); if (!r.allow.map(x => x.toLowerCase()).includes(v)) r.allow.push(v); this.saveGuardRules(r); return { ok: true };
+  }
+  guardUnallow(id) { const v = String(id || '').toLowerCase(); const r = this.guardRules(); r.allow = r.allow.filter(x => x.toLowerCase() !== v); this.saveGuardRules(r); return { ok: true }; }
+  guardAddPair(bad, other, why) {
+    bad = String(bad || '').trim(); other = String(other || '').trim();
+    if (!bad || !other || bad.toLowerCase() === other.toLowerCase()) throw new Error('Pick two different mods.');
+    const r = this.guardRules();
+    if (!r.pairs.some(p => p.bad.toLowerCase() === bad.toLowerCase() && p.other.toLowerCase() === other.toLowerCase())) r.pairs.push({ bad, other, why: String(why || '').slice(0, 200) || 'You marked these two as incompatible.' });
+    this.saveGuardRules(r); return { ok: true };
+  }
+  guardRemovePair(bad, other) { const r = this.guardRules(); r.pairs = r.pairs.filter(p => !(p.bad === bad && p.other === other)); this.saveGuardRules(r); return { ok: true }; }
+  guardAnalyze(text) { return guard.analyze(text, this.guardScan().mods); }
+  guardDisabled() { try { return fs.readdirSync(path.join(this.dir, 'mods-disabled')).filter(n => /\.jar$/i.test(n)); } catch { return []; } }
+  async guardRestore(file) {
+    const base = path.basename(String(file));
+    await fsp.mkdir(path.join(this.dir, 'mods'), { recursive: true });
+    await fsp.rename(path.join(this.dir, 'mods-disabled', base), path.join(this.dir, 'mods', base));
+    return { ok: true };
+  }
+  guardScan() { const s = guard.scan(this.modDirs(), this.gameVersion(), this.guardRules()); s.disabled = this.guardDisabled(); return s; }
+
+  /** Reason a freshly added kit jar must NOT be kept (null = fine). Missing libraries are not a reason: they get added next. */
+  guardCandidate(safe) {
+    for (const i of this.guardScan().issues) {
+      if (i.level !== 'error' || i.code === 'missing-dep') continue;
+      if (i.mod !== safe && !i.others.includes(safe)) continue;
+      if (i.code === 'duplicate') { if (i.mod === safe) return `you already have a newer copy of this mod (${i.others[0]}).`; continue; }
+      return `${i.title}. ${i.why}`;
+    }
+    return null;
+  }
+  /** After adding a newer version of a mod, drop the older copy so Fabric never sees two. */
+  async guardDropOlderCopies(safe, progress) {
+    for (const i of this.guardScan().issues) {
+      if (i.code === 'duplicate' && i.others.includes(safe) && i.mod !== safe && i.where === 'kit') {
+        await this.removeFromKit('mods', i.mod); progress(`Replaced older ${i.mod}`);
+      }
+    }
+  }
+  async guardRemove(file, where) {
+    const base = path.basename(String(file));
+    if (where === 'server') {   // never hard-delete from the live server: park it
+      const off = path.join(this.dir, 'mods-disabled');
+      await fsp.mkdir(off, { recursive: true });
+      await fsp.rename(path.join(this.dir, 'mods', base), path.join(off, base));
+    } else await this.removeFromKit('mods', base);
+  }
+  async findDepProject(dep) {
+    const norm = s => String(s).toLowerCase().replace(/[^a-z0-9]/g, '');
+    let proj = null;
+    try { proj = await fetchJSON(`${API}/project/${encodeURIComponent(dep)}`); } catch { /* try search */ }
+    if (!proj) {
+      const facets = encodeURIComponent(JSON.stringify([['project_type:mod'], ['categories:fabric']]));
+      const r = await fetchJSON(`${API}/search?limit=5&query=${encodeURIComponent(dep)}&facets=${facets}`);
+      const hit = (r.hits || []).find(h => norm(h.slug) === norm(dep) || norm(h.slug).startsWith(norm(dep)) || norm(h.title) === norm(dep));
+      if (hit) proj = { id: hit.project_id, title: hit.title };
+    }
+    if (!proj) throw new Error(`couldn't find “${dep}” automatically - search it by hand: https://modrinth.com/mods?q=${encodeURIComponent(dep)}&g=categories:fabric`);
+    return proj;
+  }
+  async guardAddDep(dep, progress) {
+    const proj = await this.findDepProject(dep);
+    await this.installModWithDeps(proj.id, false, progress, false, { asDep: true });
+    return proj.title || dep;
+  }
+  /** Apply fixes. opts.all = everything fixable (repeats until clean); opts.fixes = the exact fixes the user clicked. */
+  async guardFix(opts, progress = () => {}) {
+    const log = [];
+    for (let pass = 0; pass < 4; pass++) {
+      let todo = this.guardScan().issues.filter(i => i.level === 'error' && i.fix);
+      if (!opts.all) {
+        const want = Array.isArray(opts.fixes) ? opts.fixes : [];
+        todo = todo.filter(i => want.some(w => w && w.action === i.fix.action && w.file === i.fix.file && w.dep === i.fix.dep && w.where === i.fix.where));
+      }
+      if (!todo.length) break;
+      let acted = false;
+      const doneRm = new Set();
+      for (const i of todo.filter(x => x.fix.action === 'remove')) {
+        const k = i.fix.where + '/' + i.fix.file; if (doneRm.has(k)) continue; doneRm.add(k);
+        try { await this.guardRemove(i.fix.file, i.fix.where); log.push(`Removed ${i.fix.file} (${i.title})`); progress(`Removed ${i.fix.file}`); acted = true; }
+        catch (e) { log.push(`Couldn't remove ${i.fix.file}: ${e.message}`); }
+      }
+      if (!acted || !opts.all) {
+        const deps = [...new Set(todo.filter(x => x.fix.action === 'addDep').map(x => x.fix.dep))];
+        for (const dep of deps) {
+          progress(`Adding required library ${dep}...`);
+          try { const t = await this.guardAddDep(dep, progress); log.push(`Added ${t}`); acted = true; }
+          catch (e) { log.push(`${dep}: ${e.message}`); }
+        }
+      }
+      if (!acted || !opts.all) break;
+    }
+    const left = this.guardScan().issues.filter(i => i.level === 'error').length;
+    progress(left ? `Done - ${left} problem${left > 1 ? 's' : ''} still need you (see Mod Guard).` : 'All mods are compatible.', 100);
+    return { ok: true, log, remaining: left };
   }
 
   /** Host uploads a file they downloaded themselves (PlanetMinecraft, CurseForge...). It ships inside the installer zip. */
@@ -330,9 +628,14 @@ class Packs {
     const dir = path.join(this.kitDir, folder);
     await fsp.mkdir(dir, { recursive: true });
     await fsp.rename(tmpFile, path.join(dir, safe)).catch(async () => { await fsp.copyFile(tmpFile, path.join(dir, safe)); await fsp.rm(tmpFile, { force: true }); });
+    if (folder === 'mods') {
+      const bad = this.guardCandidate(safe);
+      if (bad) { await fsp.rm(path.join(dir, safe), { force: true }); throw new Error(`Mod Guard blocked ${safe}: ${bad}`); }
+    }
     const man = this.kitManifest().filter(e => !(e.folder === folder && e.name === safe));
     man.push({ folder, name: safe, sha1, size: (await fsp.stat(path.join(dir, safe))).size, local: true });
     this.saveKitManifest(man);
+    if (folder === 'mods') await this.guardDropOlderCopies(safe, () => {});
     return { name: safe };
   }
 
@@ -341,6 +644,7 @@ class Packs {
     const base = path.basename(String(name));
     await fsp.rm(path.join(this.kitDir, folder, base), { force: true });
     this.saveKitManifest(this.kitManifest().filter(e => !(e.folder === folder && e.name === base)));
+    if (folder === 'mods') await this.pruneOrphanDeps().catch(() => {});
   }
 
   /** Builds player-kit zip with an install guide. Returns temp zip path. */

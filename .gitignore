@@ -6,6 +6,8 @@ dashboard/sync-key.pem
 Blockhost-Sync-*.bat
 dashboard/sync-clients.json
 dashboard/seen-players.json
+dashboard/baton-state.json
+dashboard/perf-undo.json
 
 # --- Minecraft server data (lives next to the dashboard, not in this repo) ---
 server.properties

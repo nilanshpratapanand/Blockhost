@@ -1,0 +1,16 @@
+# Blockhost Baton - free, no card needed (world stored in a Durable Object).
+name = "blockhost-baton"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+[[durable_objects.bindings]]
+name = "LEASE"
+class_name = "Lease"
+
+[[durable_objects.bindings]]
+name = "STORE"
+class_name = "Store"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Lease", "Store"]

@@ -236,6 +236,7 @@
     es.addEventListener('state', e => { const prev = S.snap && S.snap.state; applySnap(JSON.parse(e.data)); emit('state', prev); });
     es.addEventListener('line', e => { const l = JSON.parse(e.data); S.lines.push(l); if (S.lines.length > 3000) S.lines.shift(); emit('line', l); });
     es.addEventListener('players', e => { if (S.snap) { const d = JSON.parse(e.data); S.snap.players = Array.isArray(d) ? d : d.players; S.snap.onlineCount = Array.isArray(d) ? S.snap.players.length : d.count; $('#brandSub').textContent = S.snap.state === 'online' ? `${S.snap.onlineCount}/${S.snap.maxPlayers} online` : 'local server'; renderNav(); } emit('players'); });
+    es.addEventListener('baton', e => { S.baton = JSON.parse(e.data); emit('baton'); });
     es.addEventListener('sync', e => { S.sync = JSON.parse(e.data); emit('sync'); });
     es.addEventListener('stats', e => {
       const s = JSON.parse(e.data); S.stats = s;
@@ -281,6 +282,7 @@
     { id: 'overview', label: 'Overview', icon: 'home' },
     { id: 'console', label: 'Console', icon: 'terminal' },
     { id: 'players', label: 'Players', icon: 'users' },
+    { id: 'cloud', label: 'Cloud Host', icon: 'cloud' },
     { group: 'Configure' },
     { id: 'options', label: 'Options', icon: 'sliders' },
     { id: 'gamerules', label: 'Game rules', icon: 'rules' },
@@ -342,6 +344,7 @@
         if (r.code === 'EULA') return eulaModal();
         if (r.code === 'JAVA') return javaModal(r.need);
         if (r.code === 'PORT_BUSY') return portBusyModal(r);
+        if (r.code === 'CLOUD') { toast(r.error, 'info', 6500); location.hash = '#/cloud'; return; }
         toast(r.error, 'err');
       }
     } catch (e) { toast(e.message, 'err'); }

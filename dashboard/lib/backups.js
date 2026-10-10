@@ -6,6 +6,7 @@ const path = require('path');
 const props = require('./props');
 const { createZip, extractZip } = require('./archive');
 const { stamp } = require('./util');
+const { isValidZip } = require('./storage');
 
 const CONFIG_FILES = ['server.properties', 'ops.json', 'whitelist.json', 'banned-players.json', 'banned-ips.json', 'usercache.json', 'eula.txt', 'server-icon.png'];
 
@@ -43,6 +44,12 @@ class Backups {
     const name = `backup_${stamp()}_${kind === 'auto' ? 'auto-' : ''}${safeLabel}.zip`;
     const out = path.join(this.backupDir, name);
 
+    // Smart skip: a scheduled backup of a world that has not changed since the last backup is just wasted disk space.
+    if (kind === 'auto' && label === 'scheduled') {
+      const last = this.list()[0];
+      if (last && !(await this.changedSince(last.created))) { onMsg('World unchanged since the last backup - skipped.'); return { skipped: true }; }
+    }
+
     const live = this.mc.isRunning() && this.mc.state === 'online';
     if (live) {
       onMsg('Flushing world to disk...');
@@ -54,14 +61,37 @@ class Backups {
     try {
       onMsg(`Zipping ${items.join(', ')}...`);
       await createZip(this.dir, items, out);
+      const size = fs.statSync(out).size;
+      if (!isValidZip(out, size)) throw new Error('The backup file came out damaged, so it was discarded. Try again (is the disk full?).');
+    } catch (e) {
+      try { fs.unlinkSync(out); } catch { /* nothing to remove */ }      // never leave a 0-byte / half-written zip behind
+      throw e;
     } finally {
       if (live && this.mc.isRunning()) this.mc.send('save-on');
     }
-    this.prune();
+    await this.prune();
     return { name, size: fs.statSync(out).size };
   }
 
-  prune() {
+  /** Has anything in the world been written after `ts`? (cheap: file timestamps only) */
+  async changedSince(ts) {
+    let seen = 0;
+    const walk = async d => {
+      let ents; try { ents = await fsp.readdir(d, { withFileTypes: true }); } catch { return false; }
+      for (const e of ents) {
+        if (++seen > 30000) return true;                       // huge world: assume changed
+        const p = path.join(d, e.name);
+        if (e.isDirectory()) { if (await walk(p)) return true; }
+        else { try { if ((await fsp.stat(p)).mtimeMs > ts + 1000) return true; } catch { /* ignore */ } }
+      }
+      return false;
+    };
+    for (const f of this.worldFolders()) if (await walk(path.join(this.dir, f))) return true;
+    return false;
+  }
+
+  async prune() {
+    if (this.storage) { try { await this.storage.run(); return; } catch { /* fall back to the simple rule */ } }
     const keep = Math.max(1, Number(this.getConfig().backupsToKeep) || 10);
     // Only explicit "auto-" backups are pruned. Safety copies made before a world reset/import/update
     // (before-reset, before-import, before-<version>) are 'manual' kind and must never be deleted automatically.

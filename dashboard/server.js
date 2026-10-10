@@ -46,11 +46,16 @@ const DEFAULT_CONFIG = {
   javaPath: '',
   autoRestart: true,
   autoStartServer: false,
+  batonCode: '', batonId: '', batonName: '', batonIdleMin: 30, batonMaxRamGB: 4, batonMinHostGB: 6, batonStandby: false, batonRamBackup: null,
   opGuard: true,            // operators are session-only (see lib/opguard.js)
   opGuardNames: [],
   checkUpdatesOnLaunch: true,
   backupsToKeep: 10,
   autoBackupMinutes: 0,
+  smartCleanup: true,       // see lib/storage.js
+  autoMaxDays: 14,
+  safetyDays: 7,
+  backupMaxGB: 5,
   useManagementApi: true,
   rpcPort: 25585,
   serverAddress: '',
@@ -81,11 +86,15 @@ const DEFAULT_CONFIG = {
 let config = { ...DEFAULT_CONFIG, ...U.readJSONFile(CONFIG_FILE, {}) };
 if (!fs.existsSync(CONFIG_FILE)) U.writeJSONFile(CONFIG_FILE, config);
 const getConfig = () => config;
+const RM_RETRY = { force: true, maxRetries: 10, retryDelay: 700 };   // Windows keeps files locked for a moment after a download ends
 function saveConfig(patch) { config = { ...config, ...patch }; U.writeJSONFile(CONFIG_FILE, config); }
 
 // ------------------------------------------------------------------ core objects
 const mc = new MinecraftServer(SERVER_DIR, getConfig);
 const backups = new Backups(SERVER_DIR, mc, getConfig);
+const { Storage } = require('./lib/storage');
+const storage = new Storage(SERVER_DIR, backups, getConfig, m => mc.log(m, 'dash'), () => !!(task && !task.done));
+backups.storage = storage;
 const updater = new Updater(SERVER_DIR, mc, backups, getConfig);
 const rpc = new McRpc();
 const packs = new Packs(SERVER_DIR, DASH_DIR, mc, getConfig, saveConfig);
@@ -233,6 +242,28 @@ function runTask(title, fn) {
 
 // ------------------------------------------------------------------ management API glue
 function serverProps() { return props.getAll(path.join(SERVER_DIR, 'server.properties')); }
+
+// ------------------------------------------------------------------ server tuning
+const perf = require('./lib/perf');
+const PERF_UNDO = path.join(DASH_DIR, 'perf-undo.json');
+
+// ------------------------------------------------------------------ Cloud Host (Baton)
+const { BatonHost } = require('./lib/batonhost');
+const baton = new BatonHost({
+  mc, dir: SERVER_DIR, getConfig, saveConfig, log: t => mc.log(t, 'dash'), worldName: () => serverProps()['level-name'] || 'world',
+  stateFile: path.join(DASH_DIR, 'baton-state.json'),
+});
+baton.on('state', s => broadcast('baton', s));
+
+function perfCtx() {
+  const info = mc.jarInfo(); const need = (info && info.java) || 21;
+  const { best } = findJava(need, config.javaPath);
+  return {
+    cfg: config, props: serverProps(), totalMem: require('os').totalmem(), javaMajor: best ? best.major : 0, javaPath: best ? best.path : null,
+    undoFile: PERF_UNDO, setConfig: p => saveConfig(p), setProps: ch => props.setMany(path.join(SERVER_DIR, 'server.properties'), ch),
+    writeJSON: U.writeJSONFile, readJSON: U.readJSONFile,
+  };
+}
 
 async function rpcCall(names, params) {
   let lastErr;
@@ -622,6 +653,7 @@ const routes = {
   'GET /api/stats/history': () => ({ history: statsHistory }),
 
   'POST /api/start': async () => {
+    const blocked = baton.blocksStart(); if (blocked) return { ok: false, code: 'CLOUD', error: blocked };
     if (!mc.isRunning()) {
       const port = sharedActive() && front.listening() ? internalPort() : publicPort();
       if (await portInUse(port)) {
@@ -643,7 +675,7 @@ const routes = {
     if (await portInUse(port)) throw new Error('The other server is still running. Close its window manually (type stop in it).');
     return { ok: true, how };
   },
-  'POST /api/restart': () => { mc.restart(); return { ok: true }; },
+  'POST /api/restart': () => { const blocked = baton.blocksStart(); if (blocked && !mc.isRunning()) return { ok: false, code: 'CLOUD', error: blocked }; mc.restart(); return { ok: true }; },
   'POST /api/kill': () => { mc.kill(); return { ok: true }; },
   'POST /api/command': ({ body }) => { mc.send(body.command); return { ok: true }; },
   'POST /api/eula': () => {
@@ -683,10 +715,45 @@ const routes = {
   'GET /api/versions': async ({ query }) => updater.versions(query.get('snapshots') === '1'),
   'POST /api/install': ({ body }) => runTask(`Install ${body.version}`, p => updater.install(body.version, { force: !!body.force, reinstall: !!body.reinstall }, p)),
   'GET /api/java': () => { const info = mc.jarInfo(); const need = (info && info.java) || 21; const r = findJava(need, config.javaPath); return { need, ...r }; },
+  // Cloud Host (Baton): the server follows whoever starts it; the world lives in free cloud storage
+  'GET /api/baton': () => ({ ...baton.snapshot(), code: config.batonCode || '', name: config.batonName || '', maxRamGB: config.batonMaxRamGB, solo: !config.batonCode }),
+  'POST /api/baton/join': ({ body }) => { baton.join(String(body.code || '')); return { ok: true }; },
+  'POST /api/baton/leave': () => { baton.leave(); return { ok: true }; },
+  'POST /api/baton/seed': ({ body }) => runTask('Upload world to the cloud', async p => {
+    const onState = s => { if (s.progress) p(s.message, Math.round(100 * s.progress.done / Math.max(1, s.progress.total))); };
+    baton.on('state', onState);
+    try { const r = await baton.seed(String(body.url || '').trim(), String(body.secret || '').trim()); return { ok: true, version: r.version, files: r.uploaded }; }
+    finally { baton.off('state', onState); }
+  }),
+  'POST /api/baton/start': async () => {
+    const p = baton.startHosting(); p.catch(() => {});
+    const early = await Promise.race([p.then(() => null, e => e), U.sleep(1500).then(() => null)]);
+    if (early) { if (['BUSY', 'JAVA', 'EULA'].includes(early.code)) return { ok: false, code: early.code, need: early.need, error: early.message, host: early.host }; throw early; }
+    return { ok: true };
+  },
+  'POST /api/baton/stop': () => { baton.stopHosting().catch(e => mc.log('Cloud Host: ' + e.message, 'warn')); return { ok: true }; },
+  'POST /api/baton/request': async () => { const r = await baton.requestHost(); return { ok: true, remote: r }; },
+  'POST /api/baton/refresh': async () => { await baton.refresh(); return baton.snapshot(); },
+  'POST /api/baton/standby': ({ body }) => { baton.setStandby(!!body.on); return { ok: true }; },
+  'POST /api/baton/test': async () => ({ steps: await baton.selfTest() }),
+  'POST /api/baton/settings': ({ body }) => {
+    const p = {};
+    if (body.name !== undefined) p.batonName = String(body.name).slice(0, 40);
+    if (body.idleMin !== undefined) p.batonIdleMin = Math.min(240, Math.max(5, Number(body.idleMin) || 30));
+    if (body.maxRamGB !== undefined) p.batonMaxRamGB = Math.min(16, Math.max(2, Number(body.maxRamGB) || 4));
+    saveConfig(p); broadcast('baton', baton.snapshot()); return { ok: true };
+  },
+
+  // server tuning (visual-neutral): audit, apply, undo
+  'GET /api/perf': () => { const c = perfCtx(); const a = perf.audit(c); return { ...a, canUndo: fs.existsSync(PERF_UNDO), running: mc.isRunning(), flags: undefined }; },
+  'POST /api/perf/apply': ({ body }) => { const r = perf.apply(perfCtx(), (body.ids || []).map(String)); broadcast('state', snapshot()); return { ...r, restartNeeded: mc.isRunning() }; },
+  'POST /api/perf/undo': () => { const r = perf.undo(perfCtx()); broadcast('state', snapshot()); return { ...r, restartNeeded: mc.isRunning() }; },
   'POST /api/java/install': ({ body }) => runTask(`Install Java ${body.need}`, async p => { const r = await installJava(Number(body.need) || 25, l => p(l.trim().slice(0, 120))); if (!r.ok) throw new Error(r.message); return r; }),
 
   // backups
   'GET /api/backups': () => ({ backups: backups.list(), keep: config.backupsToKeep }),
+  'GET /api/backups/storage': async () => { const pl = await storage.plan(); return { ...pl, strays: await storage.bigStrays() }; },
+  'POST /api/backups/cleanup': async () => { const r = await storage.run(); return { freed: r.freed, deleted: r.deleted, failed: r.failed }; },
   'POST /api/backups': ({ body }) => runTask('Backup', p => backups.create(body.label || 'manual', 'manual', m => p(m))),
   'POST /api/backups/restore': ({ body }) => runTask('Restore backup', p => { requireOffline(); return backups.restore(body.name, m => p(m), !!body.includeConfig); }),
   'DELETE /api/backups': ({ query }) => { backups.delete(query.get('name')); return { ok: true }; },
@@ -749,7 +816,7 @@ const routes = {
   'GET /api/config': () => ({ config }),
   'POST /api/config': ({ body }) => {
     const next = { ...config };
-    for (const k of Object.keys(DEFAULT_CONFIG)) if (k in (body.config || {})) next[k] = body.config[k];
+    for (const k of Object.keys(DEFAULT_CONFIG)) if (!k.startsWith('baton') && k in (body.config || {})) next[k] = body.config[k];
     if (!/^\d+[MG]$/i.test(next.minRam) || !/^\d+[MG]$/i.test(next.maxRam)) throw new Error('RAM must look like 2G or 2048M');
     next.curseforgeKey = require('./lib/curseforge').cleanKey(next.curseforgeKey);
     config = next; U.writeJSONFile(CONFIG_FILE, config);
@@ -759,7 +826,7 @@ const routes = {
   },
 
   // packs (Modrinth)
-  'GET /api/packs/search': ({ query }) => packs.search(query.get('type'), query.get('q'), query.get('any') === '1' ? null : (query.get('version') || packs.gameVersion()), query.get('offset'), query.get('source') || 'modrinth'),
+  'GET /api/packs/search': ({ query }) => packs.search(query.get('type'), query.get('q'), query.get('any') === '1' ? null : (query.get('version') || packs.gameVersion()), query.get('offset'), query.get('source') || 'modrinth', query.get('loader') === 'any' ? 'any' : 'fabric'),
   'POST /api/packs/lookup': ({ body }) => require('./lib/importer').lookup(String(body.input || '').slice(0, 500), packs.gameVersion(), packs),
   'POST /api/packs/import': ({ body }) => require('./lib/importer').resolve(String(body.text || '').slice(0, 20000), packs.gameVersion(), packs),
   'GET /api/packs/state': () => ({ gameVersion: packs.gameVersion(), serverPack: packs.serverPack(), datapacks: packs.listDatapacks(), kit: packs.listKit() }),
@@ -771,8 +838,21 @@ const routes = {
   'DELETE /api/packs/server-pack': () => { packs.clearServerPack(); broadcast('state', snapshot()); return { ok: true, restartNeeded: mc.isRunning() }; },
   'POST /api/packs/datapack': ({ body }) => runTask('Install data pack', p => packs.installDatapack(body.id, !!body.any, p)),
   'DELETE /api/packs/datapack': ({ query }) => packs.removeDatapack(query.get('name')),
-  'POST /api/packs/kit': ({ body }) => runTask('Add to player kit', p => packs.addToKit(['resourcepack', 'mod'].includes(body.type) ? body.type : 'shader', body.id, !!body.any, p, null, !!body.force)),
+  'POST /api/packs/kit': ({ body }) => runTask('Add to player kit', p => packs.addToKit(['resourcepack', 'mod'].includes(body.type) ? body.type : 'shader', body.id, !!body.any, p, null, !!body.force, undefined, { noDeps: !!body.noDeps })),
   'GET /api/packs/kit/check': () => packs.kitCheck(),
+  'GET /api/packs/guard': () => packs.guardScan(),
+  'GET /api/packs/mods': () => ({ mods: packs.listMods() }),
+  'GET /api/packs/mod/plan': ({ query }) => packs.planMod(query.get('id')),
+  'POST /api/packs/mods/disable': async ({ body }) => packs.disableMod(body.name),
+  'POST /api/packs/mods/enable': ({ body }) => runTask('Switch mod on', p => packs.enableMod(body.name, p)),
+  'DELETE /api/packs/mods': async ({ query }) => packs.removeMod(query.get('name'), { cascade: query.get('cascade') === '1' }),
+  'POST /api/packs/guard/allow': ({ body }) => packs.guardAllow(body.id),
+  'DELETE /api/packs/guard/allow': ({ query }) => packs.guardUnallow(query.get('id')),
+  'POST /api/packs/guard/pair': ({ body }) => packs.guardAddPair(body.bad, body.other, body.why),
+  'DELETE /api/packs/guard/pair': ({ query }) => packs.guardRemovePair(query.get('bad'), query.get('other')),
+  'POST /api/packs/guard/analyze': ({ body }) => packs.guardAnalyze(body.text),
+  'POST /api/packs/guard/restore': async ({ body }) => packs.guardRestore(body.file),
+  'POST /api/packs/guard/fix': ({ body }) => runTask('Mod Guard fix', p => packs.guardFix({ all: !!body.all, fixes: body.fixes }, p)),
   'DELETE /api/packs/kit': async ({ query }) => { await packs.removeFromKit(query.get('folder'), query.get('name')); return { ok: true }; },
 
   // one-click setup wizard
@@ -981,7 +1061,7 @@ const streamRoutes = {
   },
   'GET /api/packs/kit/download': async ({ res }) => {
     const zip = await packs.buildKit(config.serverAddress);
-    res.on('close', () => fs.rm(zip, { force: true }, () => {}));
+    res.on('close', () => fs.rm(zip, RM_RETRY, () => {}));
     sendFile(res, zip, `player-kit-${packs.gameVersion() || 'minecraft'}.zip`);
   },
   'GET /api/packs/installer': async ({ res, query }) => {
@@ -1001,6 +1081,7 @@ const streamRoutes = {
     // uploaded files can't be downloaded from the internet by friends, so ship them inside a zip with the .bat
     const tmp = path.join(SERVER_DIR, 'backups', `.installer-${Date.now()}`);
     await fsp.mkdir(tmp, { recursive: true });
+    let zip = null;
     try {
       fs.writeFileSync(path.join(tmp, `${base}.bat`), bat);
       fs.writeFileSync(path.join(tmp, 'READ ME FIRST.txt'), 'Right-click this zip > Extract All, open the extracted folder, then double-click the .bat file.\r\n');
@@ -1013,16 +1094,17 @@ const streamRoutes = {
           try { const h = await U.download(m.url, dest); if (m.sha1 && h !== m.sha1) await fsp.rm(dest, { force: true }); } catch { await fsp.rm(dest, { force: true }); }
         }
       }
-      const zip = tmp + '.zip';
+      zip = tmp + '.zip';
       await createZip(tmp, fs.readdirSync(tmp), zip);
-      res.on('close', () => fs.rm(zip, { force: true }, () => {}));
+      res.on('close', () => fs.rm(zip, RM_RETRY, () => {}));
       res.writeHead(200, { ...headers, 'Content-Type': 'application/zip', 'Content-Length': fs.statSync(zip).size, 'Content-Disposition': `attachment; filename="${base}.zip"` });
       fs.createReadStream(zip).pipe(res);
-    } finally { fs.rm(tmp, { recursive: true, force: true }, () => {}); }
+    } catch (e) { if (zip) fs.rm(zip, RM_RETRY, () => {}); throw e; }
+    finally { fs.rm(tmp, { recursive: true, force: true, ...RM_RETRY }, () => {}); }
   },
   'GET /api/packs/kit/download': async ({ res }) => {
     const zip = await packs.buildKit(config.serverAddress);
-    res.on('close', () => fs.rm(zip, { force: true }, () => {}));
+    res.on('close', () => fs.rm(zip, RM_RETRY, () => {}));
     sendFile(res, zip, `player-kit-${packs.gameVersion() || 'minecraft'}.zip`);
   },
   'POST /api/packs/kit/upload': async ({ req, res, query }) => {
@@ -1038,7 +1120,7 @@ const streamRoutes = {
     const tmp = path.join(SERVER_DIR, 'backups', `.world-download-${Date.now()}.zip`);
     fs.mkdirSync(path.dirname(tmp), { recursive: true });
     await createZip(SERVER_DIR, items, tmp);
-    res.on('close', () => fs.rm(tmp, { force: true }, () => {}));
+    res.on('close', () => fs.rm(tmp, RM_RETRY, () => {}));
     sendFile(res, tmp, `${backups.levelName()}-${U.stamp()}.zip`);
   },
   'POST /api/world/upload': async ({ req, res }) => {
@@ -1119,6 +1201,9 @@ mc.on('state', s => {
   if (s.state === 'starting' && mc.proc) { try { require('os').setPriority(mc.proc.pid, require('os').constants.priority.PRIORITY_ABOVE_NORMAL); } catch { /* needs no admin on Windows; ignore if refused */ } }
 });
 
+setTimeout(() => storage.run().catch(() => {}), 20000);                 // clear stale temp files / failed backups shortly after launch
+setInterval(() => storage.run({ quiet: true }).catch(() => {}), 30 * 60000);
+
 server.listen(config.port, '127.0.0.1', async () => {
   const url = `http://localhost:${config.port}`;
   console.log(`\n  Blockhost dashboard running at ${url}`);
@@ -1141,7 +1226,8 @@ server.listen(config.port, '127.0.0.1', async () => {
   if (sharedActive() && !mc.isRunning()) { if (!(await front.start())) mc.log('Live Sync front door: ' + front.error, 'warn'); }
   sync.url().catch(() => {});
   if (!mc.isRunning()) { try { opGuard.scrub(); } catch (e) { mc.log('Op Guard scrub failed: ' + e.message, 'warn'); } }   // e.g. server was last stopped via run.bat
-  if (config.autoStartServer) mc.start().catch(e => mc.log('Auto-start failed: ' + e.message, 'error'));
+  baton.boot();
+  if (config.autoStartServer && !baton.blocksStart()) mc.start().catch(e => mc.log('Auto-start failed: ' + e.message, 'error'));
 });
 
 server.on('error', e => {
@@ -1161,6 +1247,10 @@ process.on('unhandledRejection', e => { console.error(e); try { mc.log('Dashboar
 let shuttingDown = false;
 async function shutdown() {
   if (shuttingDown) return; shuttingDown = true;
+  if (baton.phase === 'hosting') {
+    console.log('Saving the world to the cloud and handing the server back...');
+    await Promise.race([baton.handoff('the dashboard was closed'), U.sleep(120000)]).catch(() => {});
+  }
   if (mc.isRunning()) { console.log('Stopping Minecraft server...'); await mc.stop(60000); }
   process.exit(0);
 }
