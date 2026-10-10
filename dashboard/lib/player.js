@@ -178,15 +178,20 @@ function createPlayer(o) {
   };
   const routes = {
     'GET /state': async ({ fresh }) => { if (fresh && ['off', 'error', 'lost'].includes(baton.phase)) await baton.refresh(); return view(); },
+    // returns at once: Java/playit downloads and the world pull can take minutes, and the tray window must never wait for them
     'POST /start': async () => {
-      if (!['off', 'error', 'lost'].includes(baton.phase)) return view();
-      await prepare();
-      const p = baton.startHosting(); p.catch(e => log('Start failed: ' + e.message));
-      await Promise.race([p.catch(() => {}), sleep(1500)]);
+      if (!['off', 'error', 'lost'].includes(baton.phase) || P.starting) return view();
+      P.starting = true;
+      (async () => {
+        try { await prepare(); await baton.startHosting(); }
+        catch (e) { log('Start failed: ' + e.message); if (!['error', 'lost'].includes(baton.phase)) baton.set('error', e.message, { error: e.message }); }
+        finally { P.starting = false; }
+      })();
+      await sleep(150);
       return view();
     },
     'POST /stop': async () => { baton.stopHosting().catch(e => log('Stop failed: ' + e.message)); await sleep(200); return view(); },
-    'POST /recheck': async () => { await reachCheck(); return view(); },
+    'POST /recheck': async () => { reachCheck().catch(() => {}); await sleep(50); return view(); },
     'POST /request': async () => { await baton.requestHost(); return view(); },
     'POST /standby': async ({ body }) => { baton.setStandby(!!body.on); return view(); },
     'POST /quit': async () => { setTimeout(() => shutdown(), 50); return { ok: true }; },

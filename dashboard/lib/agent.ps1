@@ -639,12 +639,12 @@ function Start-Player {
   $sp = @{ FilePath = $node; ArgumentList = @(('"' + $js + '"'), ('"' + $HostDir + '"')) }
   if ($IsWin) { $sp.WindowStyle = 'Hidden' }
   Start-Process @sp
-  for ($i = 0; $i -lt 60; $i++) { Start-Sleep -Milliseconds 250; if (Get-PlayerCtl) { return $true } }
+  for ($i = 0; $i -lt 60; $i++) { Start-Sleep -Milliseconds 250; if (-not $NoGui) { [Windows.Forms.Application]::DoEvents() }; if (Get-PlayerCtl) { return $true } }
   Log 'the server helper did not start'; return $false
 }
 function Start-HostServer {
   if (-not (Start-Player)) { Notify 'Blockhost' 'Could not start the server helper. Tray icon > Show log for details.'; return }
-  $st = Invoke-Player 'POST' '/start' $null 180
+  $st = Invoke-Player 'POST' '/start' $null 15
   if (-not $st) { Notify 'Blockhost' 'The server helper did not answer. Try again in a minute.'; return }
   if ($st.ok -eq $false -and $st.error) { Notify 'Blockhost' ([string]$st.error); return }
   Notify 'Blockhost' 'Starting the server on this PC... a notification will tell you when friends can join.'
@@ -667,7 +667,7 @@ function Get-HostLine($st) {
 # runs on every tray tick: notices state changes of the helper and tells the user once
 function Invoke-HostPoll {
   if (-not (Get-PlayerCtl)) { $script:HS = $null; return }
-  $st = Invoke-Player 'GET' '/state' $null 4
+  $st = Invoke-Player 'GET' '/state' $null 3
   if (-not $st) { return }
   $script:HS = $st
   $ph = [string]$st.phase
@@ -752,17 +752,18 @@ function New-HostWindow {
   $f.Text = "Blockhost - $($Cfg.serverName)"; $f.StartPosition = 'CenterScreen'; $f.FormBorderStyle = 'FixedSingle'; $f.MaximizeBox = $false
   $f.ClientSize = New-Object Drawing.Size(470, 540); $f.BackColor = $bg; $f.ForeColor = $fg; $f.Font = New-Object Drawing.Font('Segoe UI', 10)
   try { $f.Icon = $script:Tray.Icon } catch { }
+  try { $f.GetType().GetProperty('DoubleBuffered', [Reflection.BindingFlags]'Instance,NonPublic').SetValue($f, $true, $null) } catch { }
   $mk = {
     param($parent, $text, $x, $y, $w, $h, $size, $color, $bold)
     $l = New-Object Windows.Forms.Label
-    $l.Text = $text; $l.Left = $x; $l.Top = $y; $l.Width = $w; $l.Height = $h; $l.ForeColor = $color; $l.BackColor = [Drawing.Color]::Transparent
+    $l.Text = $text; $l.Left = $x; $l.Top = $y; $l.Width = $w; $l.Height = $h; $l.ForeColor = $color; $l.BackColor = $parent.BackColor; $l.AutoSize = $false
     $st = [Drawing.FontStyle]::Regular; if ($bold) { $st = [Drawing.FontStyle]::Bold }
     $l.Font = New-Object Drawing.Font('Segoe UI', $size, $st)
     $parent.Controls.Add($l); return $l
   }
   $W = @{}
   $W.title = & $mk $f ([string]$Cfg.serverName) 24 18 420 36 17 $purple $true
-  [void](& $mk $f 'Shared server - whoever starts it hosts it, then it sleeps and saves to the cloud.' 24 56 424 22 9 $dim $false)
+  [void](& $mk $f 'Whoever starts it hosts it. It saves to the cloud and sleeps.' 24 56 424 22 9 $dim $false)
   $panel = New-Object Windows.Forms.Panel; $panel.Left = 24; $panel.Top = 88; $panel.Width = 422; $panel.Height = 170; $panel.BackColor = $card; $f.Controls.Add($panel)
   $W.dot = & $mk $panel ([string][char]0x25CF) 14 12 34 36 20 (ColorOf 'gray') $false
   $W.state = & $mk $panel 'Server asleep' 48 14 360 32 15 $fg $true
@@ -774,7 +775,7 @@ function New-HostWindow {
   $W.addr.Font = New-Object Drawing.Font('Consolas', 14, [Drawing.FontStyle]::Bold)
   $W.copy = New-Object Windows.Forms.Button; $W.copy.Text = 'Copy'; $W.copy.Left = 360; $W.copy.Top = 290; $W.copy.Width = 86; $W.copy.Height = 32; $W.copy.FlatStyle = 'Flat'; $W.copy.ForeColor = $fg; $W.copy.BackColor = $card; $W.copy.FlatAppearance.BorderColor = [Drawing.Color]::FromArgb(60, 70, 92); $f.Controls.Add($W.copy)
   $W.main = New-Object Windows.Forms.Button; $W.main.Left = 24; $W.main.Top = 340; $W.main.Width = 422; $W.main.Height = 54; $W.main.FlatStyle = 'Flat'; $W.main.Font = New-Object Drawing.Font('Segoe UI', 12, [Drawing.FontStyle]::Bold); $W.main.ForeColor = [Drawing.Color]::White; $W.main.BackColor = [Drawing.Color]::FromArgb(110, 80, 235); $W.main.FlatAppearance.BorderSize = 0; $f.Controls.Add($W.main)
-  $W.standby = New-Object Windows.Forms.CheckBox; $W.standby.Text = 'Start the server automatically when a friend asks (this PC must be on)'; $W.standby.Left = 24; $W.standby.Top = 408; $W.standby.Width = 430; $W.standby.Height = 26; $W.standby.ForeColor = $fg; $W.standby.Checked = [bool](Prop $Cfg 'standby' $false); $f.Controls.Add($W.standby)
+  $W.standby = New-Object Windows.Forms.CheckBox; $W.standby.Text = 'Wake the server when a friend asks'; $W.standby.Left = 24; $W.standby.Top = 408; $W.standby.Width = 430; $W.standby.Height = 26; $W.standby.ForeColor = $fg; $W.standby.Checked = [bool](Prop $Cfg 'standby' $false); $f.Controls.Add($W.standby)
   $W.stats = & $mk $f '' 24 440 422 22 9 $dim $false
   $W.sync = & $mk $f '' 24 462 422 22 9 $dim $false
   $W.log = New-Object Windows.Forms.Button; $W.log.Text = 'Show log'; $W.log.Left = 24; $W.log.Top = 494; $W.log.Width = 100; $W.log.Height = 30; $W.log.FlatStyle = 'Flat'; $W.log.ForeColor = $fg; $W.log.BackColor = $card; $W.log.FlatAppearance.BorderColor = [Drawing.Color]::FromArgb(60, 70, 92); $f.Controls.Add($W.log)
@@ -798,7 +799,7 @@ function New-HostWindow {
     if ($miStandby) { $miStandby.Checked = $on }
   })
   $W.log.add_Click({ $lf = Join-Path $HostDir 'host.log'; if (Test-Path -LiteralPath $lf) { Start-Process notepad.exe $lf } else { Start-Process notepad.exe $LogFile } })
-  $W.recheck.add_Click({ $null = Invoke-Player 'POST' '/recheck' $null 20; Invoke-HostPoll; Update-HostWindow })
+  $W.recheck.add_Click({ $null = Invoke-Player 'POST' '/recheck' $null 5; Invoke-HostPoll; Update-HostWindow })
   $W.hide.add_Click({ $script:Win.form.Hide() })
   $f.add_FormClosing({ param($s, $e) if ($e.CloseReason -eq 'UserClosing') { $e.Cancel = $true; $script:Win.form.Hide() } })
   $W.form = $f
