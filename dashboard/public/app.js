@@ -201,6 +201,27 @@
   const listeners = new Set();
   const emit = (kind, data) => listeners.forEach(fn => { try { fn(kind, data); } catch (e) { console.error(e); } });
 
+
+  // ---- the camp fire: a 12x15 pixel sprite whose state mirrors the server (see body.state-* in app.css) ----
+  const FIRE = {
+    f1: ['.....o......','....oo......','....ooo.....','...ooaoo.o..','..ooaaaooo..','..oaayaaoo..','.ooaayyaaoo.','.oaayyyyaao.','.oaayywyaao.','.ooaayyyaoo.','..ooaayaoo..','...oooooo...'],
+    f2: ['......o.....','......oo....','.....ooo....','..o.oaaoo...','..ooaaaaoo..','..oaayyaoo..','.ooaayyaaoo.','.oaayyyyaoo.','.oaayywyaao.','.ooaayyyaoo.','..ooaayaoo..','...oooooo...'],
+    f3: ['............','.....o......','....oo.o....','...ooaooo...','..ooaaaaoo..','..oaayyaaoo.','.ooaayyyaoo.','.oaayyyyaao.','.oaayywyaao.','.ooaayyyaoo.','..ooaayaoo..','...oooooo...'],
+    sf: ['............','............','............','............','............','............','.....o......','....oao.....','...oaayo....','...oayyao...','....oaao....','....oooo....'],
+    co: ['............','............','............','............','............','............','............','............','....e..e....','...ekeeke...','..keeekeek..','.kekeekekek.'],
+    sm: ['............','.....s......','....ss......','.....ss.....','....s.......','.....s......','....ss......','............','............','............','............','............'],
+    lg: ['..llLLLLll..','.llLlllLLll.','LLLLLLLLLLLL'],
+  };
+  function pix(rows, y0 = 0) {
+    let out = '';
+    rows.forEach((row, r) => { for (let m, re = /([^.])\1*/g; (m = re.exec(row));) out += `<rect class="${m[1]}" x="${m.index}" y="${r + y0}" width="${m[0].length}" height="1"/>`; });
+    return out;
+  }
+  const fire = (cell = 8) => `<div class="camp" style="--cell:${cell}px" aria-hidden="true"><svg class="fire" viewBox="0 0 12 15" width="${12 * cell}" height="${15 * cell}">` +
+    `<g class="co">${pix(FIRE.co)}</g><g class="sm">${pix(FIRE.sm)}</g><g class="sf">${pix(FIRE.sf)}</g>` +
+    `<g class="fl f1">${pix(FIRE.f1)}</g><g class="fl f2">${pix(FIRE.f2)}</g><g class="fl f3">${pix(FIRE.f3)}</g>` +
+    `<g class="lg">${pix(FIRE.lg, 12)}</g></svg><i></i><i></i><i></i><i></i></div>`;
+
   function applySnap(snap) {
     S.snap = snap;
     document.body.className = document.body.className.replace(/\bstate-\w+/g, '').trim() + ' state-' + snap.state;
@@ -410,6 +431,7 @@
   // ---------------------------------------------------------------- init
   function init() {
     $('#menuBtn').innerHTML = ic('menu');
+    $('#brandFire').innerHTML = fire(2.4);
     $('#menuBtn').onclick = () => document.body.classList.toggle('nav-open');
     $('#topAddress').onclick = () => { if (S.snap && S.snap.address) copyText(S.snap.address); else location.hash = '#/settings'; };
     window.addEventListener('hashchange', router);
@@ -418,5 +440,5 @@
     connect();
   }
 
-  window.BH = { $, $$, esc, ic, api, post, cmd, toast, modal, confirmBox, fmtBytes, fmtDur, fmtDate, ago, titleCase, avatar, mcFormat, stripMc, store, S, pages, startServer, stopServer, eulaModal, javaModal, sparkline, copyText, router, init };
+  window.BH = { $, $$, esc, ic, fire, api, post, cmd, toast, modal, confirmBox, fmtBytes, fmtDur, fmtDate, ago, titleCase, avatar, mcFormat, stripMc, store, S, pages, startServer, stopServer, eulaModal, javaModal, sparkline, copyText, router, init };
 })();

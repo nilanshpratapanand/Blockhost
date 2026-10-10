@@ -55,7 +55,7 @@
         $('#ovHero').innerHTML = `
           <div style="min-width:0;position:relative">
             <div class="server-id">
-              <div class="server-icon" id="heroIcon"><img src="/api/icon?${Date.now()}" alt="" onerror="this.parentNode.innerHTML='<svg viewBox=&quot;0 0 32 32&quot;><path fill=&quot;#7c5cff&quot; d=&quot;M16 2 29 9v14l-13 7-13-7V9z&quot;/><path fill=&quot;#b8a3ff&quot; d=&quot;M16 2 29 9l-13 7L3 9z&quot;/><path fill=&quot;#5634d4&quot; d=&quot;M16 16v14l13-7V9z&quot;/></svg>'"></div>
+              <div class="server-icon" id="heroIcon"><img src="/api/icon?${Date.now()}" alt="" onerror="this.parentNode.innerHTML='<svg viewBox=&quot;0 0 32 32&quot;><path fill=&quot;#ee9b3d&quot; d=&quot;M16 2 29 9v14l-13 7-13-7V9z&quot;/><path fill=&quot;#ffd27a&quot; d=&quot;M16 2 29 9l-13 7L3 9z&quot;/><path fill=&quot;#a85a14&quot; d=&quot;M16 16v14l13-7V9z&quot;/></svg>'"></div>
               <div style="min-width:0"><div class="eyebrow">Minecraft Java · ${esc(s.version || s.installedVersion || 'not installed')}</div><div class="motd">${mcFormat(s.motd)}</div></div>
             </div>
             ${s.address ? `<div class="big-address">${esc(s.address)}<button class="icon-btn" id="cpAddr" title="Copy">${ic('copy')}</button></div><div class="muted small">Share this address with friends. They join via Multiplayer → Add Server.</div>`
@@ -72,6 +72,7 @@
             </div>
           </div>
           <div class="power-wrap">
+            ${BH.fire(7)}
             <button class="power" id="powerBtn" ${['starting', 'stopping'].includes(s.state) ? 'disabled' : ''} aria-label="${lbl}">${ic(s.state === 'online' ? 'power' : ['starting', 'stopping'].includes(s.state) ? 'clock' : 'play')}</button>
             <div class="power-label">${lbl}</div>
             <div class="power-sub" id="powerSub">${sub}</div>
@@ -90,7 +91,7 @@
         $('#ovStats').innerHTML = `
           <div class="card stat"><div class="eyebrow">${ic('users')}Players</div><div class="stat-value">${s.state !== 'online' && s.external ? s.external.online : (s.onlineCount ?? s.players.length)}<small>/ ${s.maxPlayers}</small></div>
             <div class="faces">${s.players.slice(0, 8).map(p => avatar(p.name, 'face')).join('') || ((s.onlineCount || (s.external && s.external.online)) ? '<span class="dim small">names hidden</span>' : '<span class="dim small">Nobody online</span>')}</div></div>
-          <div class="card stat"><div class="eyebrow">${ic('cpu')}PC CPU</div><div class="stat-value">${st.cpu ?? 0}<small>%</small></div>${sparkline(h.map(x => x.cpu), '#8b6cff', 100)}</div>
+          <div class="card stat"><div class="eyebrow">${ic('cpu')}PC CPU</div><div class="stat-value">${st.cpu ?? 0}<small>%</small></div>${sparkline(h.map(x => x.cpu), '#ee9b3d', 100)}</div>
           <div class="card stat"><div class="eyebrow">${ic('memory')}Server RAM</div><div class="stat-value">${st.serverMem ? fmtBytes(st.serverMem).replace(' ', '<small>') + '</small>' : '0<small>MB</small>'}</div>${sparkline(h.map(x => x.mem), '#34d99a')}</div>
           <div class="card stat"><div class="eyebrow">${ic('globe')}World</div><div class="stat-value">${s.worldSize ? fmtBytes(s.worldSize).replace(' ', '<small>') + '</small>' : '<small>measuring…</small>'}</div>
             <div class="muted small" style="margin-top:6px">PC RAM ${fmtBytes(st.memUsed || 0)} / ${fmtBytes(st.memTotal || 0)}</div><div class="meter"><i style="width:${st.memTotal ? Math.round(st.memUsed * 100 / st.memTotal) : 0}%"></i></div></div>`;

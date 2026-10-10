@@ -369,7 +369,7 @@
             ${running() ? `<div class="banner warn"><div class="b-ico">${ic('info')}</div><div class="b-text"><b>Stop the server first</b><span>Worlds can only be swapped while the server is offline.</span></div></div>` : `
             <label class="dropzone" id="drop">${ic('upload')}<div><b>Drop a world .zip here</b> or click to choose</div><div class="dim small">Must contain a folder with level.dat. Your current world is backed up first.</div><input type="file" id="wFile" accept=".zip" hidden></label>`}
           </div>
-          <div class="card" style="border-color:rgba(255,92,99,.25)"><div class="card-h"><h2 style="color:var(--redstone)">Reset world</h2><span class="sub">Generate a brand-new world</span></div>
+          <div class="card" style="border-color:rgba(232,85,47,.25)"><div class="card-h"><h2 style="color:var(--redstone)">Reset world</h2><span class="sub">Generate a brand-new world</span></div>
             <div class="grid g-2">
               <div class="field"><label>New seed (optional)</label><input class="input mono" id="rsSeed" placeholder="leave empty for random"></div>
               <div class="field"><label>World type</label><select class="input" id="rsType">${['minecraft:normal', 'minecraft:flat', 'minecraft:large_biomes', 'minecraft:amplified'].map(t => `<option value="${t}">${titleCase(t)}</option>`).join('')}</select></div>
@@ -471,7 +471,7 @@
         let shown = content;
         if (q) shown = content.split('\n').filter(l => l.toLowerCase().includes(q)).join('\n');
         view.innerHTML = `<div class="grid" style="grid-template-columns:minmax(220px,280px) minmax(0,1fr)">
-          <div class="card" style="padding:12px;max-height:calc(100vh - 170px);overflow:auto"><div class="list">${!logs ? '<div class="skeleton"></div>' : logs.length ? logs.map(l => `<div class="list-row file-row" data-l="${esc(l.name)}" style="${sel === l.name ? 'background:rgba(139,108,255,.14);border-radius:8px' : ''}">${ic('logs', 'ft')}<div class="grow"><b style="font-size:13px">${esc(l.name.replace(/\.log(\.gz)?$/, ''))}</b><div class="sub">${fmtBytes(l.size)}</div></div></div>`).join('') : '<div class="empty">No logs yet</div>'}</div></div>
+          <div class="card" style="padding:12px;max-height:calc(100vh - 170px);overflow:auto"><div class="list">${!logs ? '<div class="skeleton"></div>' : logs.length ? logs.map(l => `<div class="list-row file-row" data-l="${esc(l.name)}" style="${sel === l.name ? 'background:rgba(238,155,61,.14);border-radius:8px' : ''}">${ic('logs', 'ft')}<div class="grow"><b style="font-size:13px">${esc(l.name.replace(/\.log(\.gz)?$/, ''))}</b><div class="sub">${fmtBytes(l.size)}</div></div></div>`).join('') : '<div class="empty">No logs yet</div>'}</div></div>
           <div class="console" style="height:calc(100vh - 170px)"><div class="console-bar"><div class="lights"><i></i><i></i><i></i></div><b class="mono small">${esc(sel || 'Pick a log')}</b><span style="flex:1"></span>
             <input class="input" id="lgQ" placeholder="Filter lines…" style="width:220px;height:30px" value="${esc(q)}">${sel ? `<a class="icon-btn" title="Download" href="/api/files/download?path=${encodeURIComponent('logs/' + sel)}">${ic('download')}</a>` : ''}</div>
             <div class="console-body" id="lgBody">${sel ? shown.split('\n').slice(-5000).map(t => {

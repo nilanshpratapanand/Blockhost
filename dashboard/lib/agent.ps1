@@ -12,7 +12,7 @@
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
-$AgentVersion = 3
+$AgentVersion = 4
 $Mode = 'agent'
 if ($env:BH_MODE) { $Mode = $env:BH_MODE } elseif ($args.Count -gt 0) { $Mode = [string]$args[0] }
 $env:BH_MODE = $null
@@ -709,9 +709,9 @@ function Update-HostMenu {
   $busy = $st -and ($st.phase -in 'checking', 'acquiring', 'downloading', 'starting', 'saving')
   $mine = $st -and $st.hosting
   $miHost.Text = Get-HostLine $st
-  $miStart.Enabled = (-not $busy) -and (-not $mine) -and (-not ($st -and $st.remote -and $st.remote.state -eq 'hosted'))
-  $miStop.Enabled = [bool]$mine
-  $miAddr.Enabled = [bool]($st -and $st.address) -or [bool](Prop (Read-Json (Join-Path $HostDir 'host.json') $null) 'address')
+  $miStart.Visible = (-not $busy) -and (-not $mine) -and (-not ($st -and $st.remote -and $st.remote.state -eq 'hosted'))
+  $miStop.Visible = [bool]$mine
+  $miAddr.Visible = [bool]($st -and $st.address) -or [bool](Prop (Read-Json (Join-Path $HostDir 'host.json') $null) 'address')
 }
 
 
@@ -744,43 +744,65 @@ function Get-HostView($st) {
   return $v
 }
 function ColorOf($n) {
-  switch ($n) { 'green' { return [Drawing.Color]::FromArgb(64, 214, 120) } 'amber' { return [Drawing.Color]::FromArgb(255, 190, 60) } 'red' { return [Drawing.Color]::FromArgb(240, 90, 90) } default { return [Drawing.Color]::FromArgb(140, 150, 172) } }
+  switch ($n) { 'green' { return [Drawing.Color]::FromArgb(127, 193, 90) } 'amber' { return [Drawing.Color]::FromArgb(238, 155, 61) } 'red' { return [Drawing.Color]::FromArgb(232, 85, 47) } default { return [Drawing.Color]::FromArgb(185, 164, 135) } }
 }
 function New-HostWindow {
-  $bg = [Drawing.Color]::FromArgb(13, 16, 23); $card = [Drawing.Color]::FromArgb(24, 29, 40); $fg = [Drawing.Color]::FromArgb(236, 240, 248); $dim = [Drawing.Color]::FromArgb(140, 150, 172); $purple = [Drawing.Color]::FromArgb(160, 130, 255)
+  # Campfire palette (same tokens as the dashboard; every text colour is >= 4.5:1 on its background)
+  $bg = [Drawing.Color]::FromArgb(12, 9, 5); $card = [Drawing.Color]::FromArgb(23, 17, 10); $well = [Drawing.Color]::FromArgb(7, 5, 3)
+  $fg = [Drawing.Color]::FromArgb(244, 230, 204); $dim = [Drawing.Color]::FromArgb(185, 164, 135); $flame = [Drawing.Color]::FromArgb(255, 210, 122)
+  $bark = [Drawing.Color]::FromArgb(75, 55, 36)
   $f = New-Object Windows.Forms.Form
   $f.Text = "Blockhost - $($Cfg.serverName)"; $f.StartPosition = 'CenterScreen'; $f.FormBorderStyle = 'FixedSingle'; $f.MaximizeBox = $false
-  $f.ClientSize = New-Object Drawing.Size(470, 540); $f.BackColor = $bg; $f.ForeColor = $fg; $f.Font = New-Object Drawing.Font('Segoe UI', 10)
+  $f.ClientSize = New-Object Drawing.Size(470, 556); $f.BackColor = $bg; $f.ForeColor = $fg; $f.Font = New-Object Drawing.Font('Segoe UI', 10)
   try { $f.Icon = $script:Tray.Icon } catch { }
   try { $f.GetType().GetProperty('DoubleBuffered', [Reflection.BindingFlags]'Instance,NonPublic').SetValue($f, $true, $null) } catch { }
   $mk = {
     param($parent, $text, $x, $y, $w, $h, $size, $color, $bold)
     $l = New-Object Windows.Forms.Label
     $l.Text = $text; $l.Left = $x; $l.Top = $y; $l.Width = $w; $l.Height = $h; $l.ForeColor = $color; $l.BackColor = $parent.BackColor; $l.AutoSize = $false
-    $st = [Drawing.FontStyle]::Regular; if ($bold) { $st = [Drawing.FontStyle]::Bold }
-    $l.Font = New-Object Drawing.Font('Segoe UI', $size, $st)
+    $fam = 'Segoe UI'; $st = [Drawing.FontStyle]::Regular; if ($bold) { $fam = 'Segoe UI Semibold' }
+    $l.Font = New-Object Drawing.Font($fam, $size, $st)
     $parent.Controls.Add($l); return $l
   }
+  # flat button in the camp style: kind = primary (amber), danger (ember), quiet (bark outline)
+  $btn = {
+    param($text, $x, $y, $w, $h, $kind)
+    $b = New-Object Windows.Forms.Button; $b.Text = $text; $b.Left = $x; $b.Top = $y; $b.Width = $w; $b.Height = $h; $b.FlatStyle = 'Flat'; $b.UseVisualStyleBackColor = $false; $b.Cursor = 'Hand'
+    $b.FlatAppearance.BorderSize = 1; $b.FlatAppearance.BorderColor = $bark; $b.BackColor = $card; $b.ForeColor = $fg
+    $b.FlatAppearance.MouseOverBackColor = [Drawing.Color]::FromArgb(45, 32, 20); $b.FlatAppearance.MouseDownBackColor = [Drawing.Color]::FromArgb(58, 43, 28)
+    if ($kind -eq 'primary') { $b.BackColor = [Drawing.Color]::FromArgb(238, 155, 61); $b.ForeColor = [Drawing.Color]::FromArgb(29, 16, 4); $b.FlatAppearance.BorderSize = 0; $b.FlatAppearance.MouseOverBackColor = [Drawing.Color]::FromArgb(255, 179, 90); $b.FlatAppearance.MouseDownBackColor = [Drawing.Color]::FromArgb(224, 138, 44) }
+    $f.Controls.Add($b); return $b
+  }
   $W = @{}
-  $W.title = & $mk $f ([string]$Cfg.serverName) 24 18 420 36 17 $purple $true
-  [void](& $mk $f 'Whoever starts it hosts it. It saves to the cloud and sleeps.' 24 56 424 22 9 $dim $false)
-  $panel = New-Object Windows.Forms.Panel; $panel.Left = 24; $panel.Top = 88; $panel.Width = 422; $panel.Height = 170; $panel.BackColor = $card; $f.Controls.Add($panel)
-  $W.dot = & $mk $panel ([string][char]0x25CF) 14 12 34 36 20 (ColorOf 'gray') $false
-  $W.state = & $mk $panel 'Server asleep' 48 14 360 32 15 $fg $true
-  $W.detail = & $mk $panel '' 18 56 388 44 10 $dim $false
-  $W.bar = New-Object Windows.Forms.ProgressBar; $W.bar.Left = 18; $W.bar.Top = 106; $W.bar.Width = 386; $W.bar.Height = 8; $W.bar.Style = 'Continuous'; $W.bar.Visible = $false; $panel.Controls.Add($W.bar)
-  $W.reach = & $mk $panel '' 18 122 388 40 9.5 $dim $false
-  [void](& $mk $f 'JOIN WITH THIS ADDRESS' 24 272 300 18 8 $dim $true)
-  $W.addr = & $mk $f '' 24 292 330 30 14 $fg $true
-  $W.addr.Font = New-Object Drawing.Font('Consolas', 14, [Drawing.FontStyle]::Bold)
-  $W.copy = New-Object Windows.Forms.Button; $W.copy.Text = 'Copy'; $W.copy.Left = 360; $W.copy.Top = 290; $W.copy.Width = 86; $W.copy.Height = 32; $W.copy.FlatStyle = 'Flat'; $W.copy.ForeColor = $fg; $W.copy.BackColor = $card; $W.copy.FlatAppearance.BorderColor = [Drawing.Color]::FromArgb(60, 70, 92); $f.Controls.Add($W.copy)
-  $W.main = New-Object Windows.Forms.Button; $W.main.Left = 24; $W.main.Top = 340; $W.main.Width = 422; $W.main.Height = 54; $W.main.FlatStyle = 'Flat'; $W.main.Font = New-Object Drawing.Font('Segoe UI', 12, [Drawing.FontStyle]::Bold); $W.main.ForeColor = [Drawing.Color]::White; $W.main.BackColor = [Drawing.Color]::FromArgb(110, 80, 235); $W.main.FlatAppearance.BorderSize = 0; $f.Controls.Add($W.main)
-  $W.standby = New-Object Windows.Forms.CheckBox; $W.standby.Text = 'Wake the server when a friend asks'; $W.standby.Left = 24; $W.standby.Top = 408; $W.standby.Width = 430; $W.standby.Height = 26; $W.standby.ForeColor = $fg; $W.standby.Checked = [bool](Prop $Cfg 'standby' $false); $f.Controls.Add($W.standby)
-  $W.stats = & $mk $f '' 24 440 422 22 9 $dim $false
-  $W.sync = & $mk $f '' 24 462 422 22 9 $dim $false
-  $W.log = New-Object Windows.Forms.Button; $W.log.Text = 'Show log'; $W.log.Left = 24; $W.log.Top = 494; $W.log.Width = 100; $W.log.Height = 30; $W.log.FlatStyle = 'Flat'; $W.log.ForeColor = $fg; $W.log.BackColor = $card; $W.log.FlatAppearance.BorderColor = [Drawing.Color]::FromArgb(60, 70, 92); $f.Controls.Add($W.log)
-  $W.recheck = New-Object Windows.Forms.Button; $W.recheck.Text = 'Test reachability'; $W.recheck.Left = 134; $W.recheck.Top = 494; $W.recheck.Width = 140; $W.recheck.Height = 30; $W.recheck.FlatStyle = 'Flat'; $W.recheck.ForeColor = $fg; $W.recheck.BackColor = $card; $W.recheck.FlatAppearance.BorderColor = [Drawing.Color]::FromArgb(60, 70, 92); $f.Controls.Add($W.recheck)
-  $W.hide = New-Object Windows.Forms.Button; $W.hide.Text = 'Hide to tray'; $W.hide.Left = 346; $W.hide.Top = 494; $W.hide.Width = 100; $W.hide.Height = 30; $W.hide.FlatStyle = 'Flat'; $W.hide.ForeColor = $fg; $W.hide.BackColor = $card; $W.hide.FlatAppearance.BorderColor = [Drawing.Color]::FromArgb(60, 70, 92); $f.Controls.Add($W.hide)
+  # header: the fire, the name, and which server this is
+  $W.fire = New-Object Windows.Forms.PictureBox; $W.fire.Left = 24; $W.fire.Top = 14; $W.fire.Width = 48; $W.fire.Height = 60; $W.fire.SizeMode = 'Normal'; $W.fire.BackColor = $bg; $f.Controls.Add($W.fire)
+  [void](& $mk $f 'Blockhost' 84 16 360 34 19 $flame $true)
+  $W.title = & $mk $f ([string]$Cfg.serverName) 86 52 360 22 10 $dim $false
+  # status card with a colour bar on its left edge
+  $panel = New-Object Windows.Forms.Panel; $panel.Left = 24; $panel.Top = 92; $panel.Width = 422; $panel.Height = 166; $panel.BackColor = $card; $f.Controls.Add($panel)
+  $W.accent = New-Object Windows.Forms.Panel; $W.accent.Left = 0; $W.accent.Top = 0; $W.accent.Width = 5; $W.accent.Height = 166; $W.accent.BackColor = (ColorOf 'gray'); $panel.Controls.Add($W.accent)
+  $W.state = & $mk $panel 'Server asleep' 22 14 384 30 15 $fg $true
+  $W.detail = & $mk $panel '' 22 50 384 46 10 $dim $false
+  $W.bar = New-Object Windows.Forms.ProgressBar; $W.bar.Left = 22; $W.bar.Top = 104; $W.bar.Width = 380; $W.bar.Height = 8; $W.bar.Style = 'Continuous'; $W.bar.Visible = $false; $panel.Controls.Add($W.bar)
+  $W.reach = & $mk $panel '' 22 120 384 40 9.5 $dim $false
+  # the address, in a recessed well
+  [void](& $mk $f 'Join with this address' 24 272 300 18 9 $dim $false)
+  $well1 = New-Object Windows.Forms.Panel; $well1.Left = 24; $well1.Top = 294; $well1.Width = 326; $well1.Height = 40; $well1.BackColor = $well; $f.Controls.Add($well1)
+  $W.addr = & $mk $well1 '' 12 6 308 28 13 $flame $false
+  $W.addr.Font = New-Object Drawing.Font('Consolas', 13, [Drawing.FontStyle]::Bold)
+  $W.copy = & $btn 'Copy' 358 294 88 40 'quiet'
+  # one big action that changes meaning with the state
+  $W.main = & $btn '' 24 352 422 54 'primary'; $W.main.Font = New-Object Drawing.Font('Segoe UI Semibold', 12)
+  $W.standby = New-Object Windows.Forms.CheckBox; $W.standby.Text = 'Wake the server when a friend asks'; $W.standby.Left = 24; $W.standby.Top = 420; $W.standby.Width = 430; $W.standby.Height = 26; $W.standby.ForeColor = $fg; $W.standby.Checked = [bool](Prop $Cfg 'standby' $false); $f.Controls.Add($W.standby)
+  $W.stats = & $mk $f '' 24 454 422 22 9 $dim $false
+  $W.sync = & $mk $f '' 24 476 422 22 9 $dim $false
+  $W.log = & $btn 'Show log' 24 510 100 30 'quiet'
+  $W.recheck = & $btn 'Test reachability' 134 510 140 30 'quiet'
+  $W.hide = & $btn 'Hide to tray' 346 510 100 30 'quiet'
+  # the fire flickers while the server is up (three frames), and stays still when Windows animations are off
+  $W.fireTimer = New-Object Windows.Forms.Timer; $W.fireTimer.Interval = 450
+  $W.fireTimer.add_Tick({ $script:FireFrame = ($script:FireFrame + 1) % 3; Set-Fire })
+  $script:FireFrame = 0; $script:FireMode = 'asleep'
 
   $W.copy.add_Click({ $a = [string]$script:Win.addr.Text; if ($a) { [Windows.Forms.Clipboard]::SetText($a); $script:Win.copy.Text = 'Copied'; Start-Sleep -Milliseconds 10 } })
   $W.main.add_Click({
@@ -800,17 +822,22 @@ function New-HostWindow {
   })
   $W.log.add_Click({ $lf = Join-Path $HostDir 'host.log'; if (Test-Path -LiteralPath $lf) { Start-Process notepad.exe $lf } else { Start-Process notepad.exe $LogFile } })
   $W.recheck.add_Click({ $null = Invoke-Player 'POST' '/recheck' $null 5; Invoke-HostPoll; Update-HostWindow })
-  $W.hide.add_Click({ $script:Win.form.Hide() })
-  $f.add_FormClosing({ param($s, $e) if ($e.CloseReason -eq 'UserClosing') { $e.Cancel = $true; $script:Win.form.Hide() } })
+  $W.hide.add_Click({ $script:Win.fireTimer.Stop(); $script:Win.form.Hide() })
+  $f.add_FormClosing({ param($s, $e) if ($e.CloseReason -eq 'UserClosing') { $e.Cancel = $true; $script:Win.fireTimer.Stop(); $script:Win.form.Hide() } })
   $W.form = $f
   $script:Win = $W
+}
+function Set-Fire {
+  $W = $script:Win; if (-not $W) { return }
+  $W.fire.Image = Get-FireBitmap $script:FireMode $script:FireFrame
+  if ($script:FireMode -eq 'online' -and [Windows.Forms.SystemInformation]::UIEffectsEnabled) { if (-not $W.fireTimer.Enabled) { $W.fireTimer.Start() } } else { $W.fireTimer.Stop() }
 }
 function Update-HostWindow {
   $W = $script:Win; if (-not $W -or -not $W.form.Visible) { return }
   $st = $script:HS
   $v = Get-HostView $st
   $c = ColorOf $v.color
-  $W.dot.ForeColor = $c; $W.state.Text = $v.title; $W.detail.Text = $v.detail
+  $W.accent.BackColor = $c; $W.state.Text = $v.title; $W.detail.Text = $v.detail
   $W.reach.Text = $v.reach; $W.reach.ForeColor = (ColorOf $v.reachColor)
   if ($v.pct -ge 0) { $W.bar.Style = 'Continuous'; $W.bar.Value = [Math]::Min(100, [Math]::Max(0, $v.pct)); $W.bar.Visible = $true } elseif ($v.busy) { $W.bar.Style = 'Marquee'; $W.bar.Visible = $true } else { $W.bar.Visible = $false }
   $addr = ''; if ($st) { $addr = [string]$st.address }
@@ -819,10 +846,15 @@ function Update-HostWindow {
   if ($W.copy.Text -eq 'Copied') { $W.copy.Text = 'Copy' }
   $mine = $st -and $st.hosting
   $busy = $v.busy
-  if ($mine) { $W.main.Text = 'Stop the server (save and sleep)'; $W.main.BackColor = [Drawing.Color]::FromArgb(150, 55, 70); $W.main.Enabled = $true }
-  elseif ($busy) { $W.main.Text = 'Working...'; $W.main.BackColor = [Drawing.Color]::FromArgb(70, 76, 96); $W.main.Enabled = $false }
-  elseif ($st -and $st.remote -and $st.remote.state -eq 'hosted') { $W.main.Text = 'Someone else is hosting'; $W.main.BackColor = [Drawing.Color]::FromArgb(70, 76, 96); $W.main.Enabled = $false }
-  else { $W.main.Text = 'Start the server for everyone'; $W.main.BackColor = [Drawing.Color]::FromArgb(110, 80, 235); $W.main.Enabled = $true }
+  $other = $st -and $st.remote -and $st.remote.state -eq 'hosted'
+  # the fire mirrors the server: coals asleep, small flame while it starts or saves, full flame online, smoke on trouble
+  $mode = 'asleep'; if ($v.color -eq 'red') { $mode = 'error' } elseif ($busy) { $mode = 'starting' } elseif ($mine -or $other) { $mode = 'online' }
+  if ($mode -ne $script:FireMode -or -not $W.fire.Image) { $script:FireMode = $mode; Set-Fire }
+  $quiet = [Drawing.Color]::FromArgb(45, 32, 20)
+  if ($mine) { $W.main.Text = 'Stop the server (save and sleep)'; $W.main.BackColor = [Drawing.Color]::FromArgb(165, 50, 19); $W.main.ForeColor = [Drawing.Color]::White; $W.main.Enabled = $true }
+  elseif ($busy) { $W.main.Text = 'Working...'; $W.main.BackColor = $quiet; $W.main.ForeColor = [Drawing.Color]::FromArgb(244, 230, 204); $W.main.Enabled = $false }
+  elseif ($other) { $W.main.Text = "$($st.remote.host.name) is keeping the fire"; $W.main.BackColor = $quiet; $W.main.ForeColor = [Drawing.Color]::FromArgb(244, 230, 204); $W.main.Enabled = $false }
+  else { $W.main.Text = 'Light the fire - start the server'; $W.main.BackColor = [Drawing.Color]::FromArgb(238, 155, 61); $W.main.ForeColor = [Drawing.Color]::FromArgb(29, 16, 4); $W.main.Enabled = $true }
   $W.recheck.Enabled = [bool]$mine
   $ps = ''; if ($st) { $ps = "Players: $($st.players)"; if ($st.ramPlan) { $ps += "   |   This PC: $($st.ramPlan.totalGB) GB RAM" }; if ($st.lastSync) { $ps += "   |   Cloud copy v$($st.lastSync.version)" } }
   $W.stats.Text = $ps
@@ -830,7 +862,7 @@ function Update-HostWindow {
 }
 function Show-HostWindow {
   if (-not $script:Win) { New-HostWindow }
-  if (-not $script:Win.form.Visible) { $script:Win.form.Show() }
+  if (-not $script:Win.form.Visible) { $script:Win.form.Show(); Set-Fire }
   $script:Win.form.WindowState = 'Normal'; $script:Win.form.Activate()
   if (Get-PlayerCtl) { Invoke-HostPoll } else { [void](Start-Player); Invoke-HostPoll }
   Update-HostWindow
@@ -917,22 +949,52 @@ if (-not $script:Mutex.WaitOne(0)) { return }
 if ($NoGui) { while ($true) { if (-not (Prop $Cfg 'hostOnly' $false)) { [void](Invoke-Sync) }; Start-Sleep -Seconds 45 } }
 
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
-function New-DotIcon($color) {
-  $bmp = New-Object Drawing.Bitmap 32, 32
-  $g = [Drawing.Graphics]::FromImage($bmp); $g.SmoothingMode = 'AntiAlias'
-  $g.FillRectangle((New-Object Drawing.SolidBrush ([Drawing.Color]::FromArgb(255, 32, 36, 44))), 2, 2, 28, 28)
-  $g.FillRectangle((New-Object Drawing.SolidBrush ([Drawing.Color]::FromArgb(255, 124, 92, 255))), 6, 6, 20, 20)
-  $g.FillEllipse((New-Object Drawing.SolidBrush $color), 18, 18, 13, 13)
+# The Blockhost camp fire: a 12x15 pixel sprite (same art as the dashboard). Mode: online | starting | asleep | error
+$script:FireRows = @{
+  f1 = @('.....o......','....oo......','....ooo.....','...ooaoo.o..','..ooaaaooo..','..oaayaaoo..','.ooaayyaaoo.','.oaayyyyaao.','.oaayywyaao.','.ooaayyyaoo.','..ooaayaoo..','...oooooo...')
+  f2 = @('......o.....','......oo....','.....ooo....','..o.oaaoo...','..ooaaaaoo..','..oaayyaoo..','.ooaayyaaoo.','.oaayyyyaoo.','.oaayywyaao.','.ooaayyyaoo.','..ooaayaoo..','...oooooo...')
+  f3 = @('............','.....o......','....oo.o....','...ooaooo...','..ooaaaaoo..','..oaayyaaoo.','.ooaayyyaoo.','.oaayyyyaao.','.oaayywyaao.','.ooaayyyaoo.','..ooaayaoo..','...oooooo...')
+  sf = @('............','............','............','............','............','............','.....o......','....oao.....','...oaayo....','...oayyao...','....oaao....','....oooo....')
+  co = @('............','............','............','............','............','............','............','............','....e..e....','...ekeeke...','..keeekeek..','.kekeekekek.')
+  sm = @('............','.....s......','....ss......','.....ss.....','....s.......','.....s......','....ss......','............','............','............','............','............')
+  lg = @('..llbbbbll..','.llblllbbll.','bbbbbbbbbbbb')
+}
+$script:FirePal = @{ o = @(232,85,47); a = @(238,155,61); y = @(255,210,122); w = @(255,244,222); l = @(154,90,40); b = @(92,50,22); e = @(240,101,42); k = @(74,36,16); s = @(122,110,98) }
+$script:FireBmps = @{}
+function New-FireBitmap([string]$mode, [int]$frame, [int]$cell, [int]$w, [int]$h, [int]$ox, [int]$oy, $back) {
+  $bmp = New-Object Drawing.Bitmap $w, $h
+  $g = [Drawing.Graphics]::FromImage($bmp); $g.SmoothingMode = 'None'; $g.PixelOffsetMode = 'Half'
+  if ($back) { $g.Clear($back) } else { $g.Clear([Drawing.Color]::Transparent) }
+  $layers = @()
+  switch ($mode) {
+    'online'   { $layers = @($script:FireRows.co, $script:FireRows[@('f1', 'f2', 'f3')[$frame % 3]]) }
+    'starting' { $layers = @($script:FireRows.co, $script:FireRows.sf) }
+    'error'    { $layers = @($script:FireRows.co, $script:FireRows.sm) }
+    default    { $layers = @($script:FireRows.co) }
+  }
+  $draw = { param($rows, $y0) for ($r = 0; $r -lt $rows.Count; $r++) { $row = [string]$rows[$r]; for ($c = 0; $c -lt $row.Length; $c++) { $ch = [string]$row[$c]; if ($ch -ne '.') { $p = $script:FirePal[$ch]; $br = New-Object Drawing.SolidBrush ([Drawing.Color]::FromArgb(255, $p[0], $p[1], $p[2])); $g.FillRectangle($br, $ox + $c * $cell, $oy + ($r + $y0) * $cell, $cell, $cell); $br.Dispose() } } } }
+  foreach ($rows in $layers) { & $draw $rows 0 }
+  & $draw $script:FireRows.lg 12
   $g.Dispose()
+  return $bmp
+}
+function Get-FireBitmap([string]$mode, [int]$frame) {
+  $key = "$mode$($frame % 3)"
+  if (-not $script:FireBmps[$key]) { $script:FireBmps[$key] = New-FireBitmap $mode $frame 4 48 60 0 0 ([Drawing.Color]::FromArgb(12, 9, 5)) }
+  return $script:FireBmps[$key]
+}
+function New-FireIcon([string]$mode, [bool]$badge) {
+  $bmp = New-FireBitmap $mode 0 2 32 32 4 1 $null
+  if ($badge) { $g = [Drawing.Graphics]::FromImage($bmp); $g.FillRectangle((New-Object Drawing.SolidBrush ([Drawing.Color]::FromArgb(255, 12, 9, 5))), 19, 19, 13, 13); $g.FillRectangle((New-Object Drawing.SolidBrush ([Drawing.Color]::FromArgb(255, 232, 85, 47))), 21, 21, 9, 9); $g.Dispose() }
   return [Drawing.Icon]::FromHandle($bmp.GetHicon())
 }
-$Icons = @{ ok = (New-DotIcon ([Drawing.Color]::FromArgb(255, 64, 214, 120))); wait = (New-DotIcon ([Drawing.Color]::FromArgb(255, 255, 190, 60))); bad = (New-DotIcon ([Drawing.Color]::FromArgb(255, 240, 80, 80))) }
+$Icons = @{ ok = (New-FireIcon 'online' $false); wait = (New-FireIcon 'asleep' $false); bad = (New-FireIcon 'error' $true) }
 $script:Tray = New-Object Windows.Forms.NotifyIcon
 $script:Tray.Icon = $Icons.wait; $script:Tray.Visible = $true; $script:Tray.Text = 'Blockhost Sync'
 $menu = New-Object Windows.Forms.ContextMenuStrip
 $miTitle = $menu.Items.Add("Blockhost Sync - $($Cfg.serverName)"); $miTitle.Enabled = $false
 $miStatus = $menu.Items.Add('Starting...'); $miStatus.Enabled = $false
-[void]$menu.Items.Add('-')
+$miSep0 = $menu.Items.Add('-')
 function Refresh-Tray {
   $miStatus.Text = $script:Status
   $t = "Blockhost Sync: $($script:Status)"; if ($t.Length -gt 63) { $t = $t.Substring(0, 60) + '...' }
@@ -940,8 +1002,10 @@ function Refresh-Tray {
   if ($script:LastError -and $script:LastError -notmatch 'not reachable') { $script:Tray.Icon = $Icons.bad } elseif ($script:Pending -gt 0 -or $script:LastError) { $script:Tray.Icon = $Icons.wait } else { $script:Tray.Icon = $Icons.ok }
 }
 if (Test-HostMode) {
+  $miTitle.Visible = $false; $miStatus.Visible = $false; $miSep0.Visible = $false
+  $miOpen = $menu.Items.Add('Open Blockhost'); $miOpen.Font = New-Object Drawing.Font($miOpen.Font, [Drawing.FontStyle]::Bold)
   $miHost = $menu.Items.Add('Server: checking...'); $miHost.Enabled = $false
-  $miOpen = $menu.Items.Add('Open the Blockhost window'); $miOpen.Font = New-Object Drawing.Font($miOpen.Font, [Drawing.FontStyle]::Bold)
+  [void]$menu.Items.Add('-')
   $miOpen.add_Click({ Show-HostWindow })
   $miStart = $menu.Items.Add('Start the server for everyone')
   $miStart.add_Click({ Start-HostServer; Invoke-HostPoll; Update-HostMenu })
@@ -949,7 +1013,7 @@ if (Test-HostMode) {
   $miStop.add_Click({ if (Ask 'Blockhost' 'Stop the server? Everyone will be disconnected. The world is saved to the cloud first.') { $null = Invoke-Player 'POST' '/stop' $null 10; Notify 'Blockhost' 'Saving the world, then the server sleeps...' } })
   $miAddr = $menu.Items.Add('Copy the server address')
   $miAddr.add_Click({ $a = ''; if ($script:HS) { $a = [string]$script:HS.address }; if (-not $a) { $a = [string](Prop (Read-Json (Join-Path $HostDir 'host.json') $null) 'address' '') }; if ($a) { [Windows.Forms.Clipboard]::SetText($a); Notify 'Blockhost' "Copied: $a" } })
-  $miStandby = $menu.Items.Add('Start the server automatically when a friend asks')
+  $miStandby = $menu.Items.Add('Wake the server when a friend asks')
   $miStandby.CheckOnClick = $true; $miStandby.Checked = [bool](Prop $Cfg 'standby' $false)
   $miStandby.add_Click({
     $on = [bool]$miStandby.Checked
@@ -970,6 +1034,7 @@ $menu.Items.Add('Uninstall Blockhost Sync').add_Click({
   if (Ask 'Blockhost Sync' 'Stop syncing with this server and remove the helper? (Packs already installed stay.)') { Remove-Agent; $script:Tray.Visible = $false; [Windows.Forms.Application]::Exit() } })
 $menu.Items.Add('Exit (until next restart)').add_Click({ if (Test-HostMode) { $null = Invoke-Player 'POST' '/quit' $null 5 }; $script:Tray.Visible = $false; [Windows.Forms.Application]::Exit() })
 $script:Tray.ContextMenuStrip = $menu
+$script:Tray.add_MouseUp({ param($sender, $e) if ($e.Button -eq [Windows.Forms.MouseButtons]::Left -and (Test-HostMode)) { Show-HostWindow } })
 $script:Tray.add_DoubleClick({ if (Test-HostMode) { Show-HostWindow } else { [void](Invoke-Sync); Refresh-Tray; Notify 'Blockhost Sync' $script:Status } })
 
 $timer = New-Object Windows.Forms.Timer
@@ -990,10 +1055,16 @@ $timer.add_Tick({
       if ($game -and -not $script:GameWas) { $script:GameWas = $true; Invoke-HostJoinCheck } elseif (-not $game) { $script:GameWas = $false }
       if (-not $syncing -and $script:Ticks -eq 1) {
         if (Prop $Cfg 'standby' $false) { if (Start-Player) { $null = Invoke-Player 'POST' '/standby' @{ on = $true } 10 } }
-        $script:Status = Get-HostLine $script:HS; $script:Tray.Icon = $Icons.ok; $script:Tray.Text = 'Blockhost'
+        $script:Status = Get-HostLine $script:HS; $script:Tray.Icon = $Icons.wait; $script:Tray.Text = 'Blockhost'
       }
     } catch { Log "host tick: $($_.Exception.Message)" }
-    if (-not $syncing) { $miStatus.Text = Get-HostLine $script:HS; $script:Tray.Icon = $(if ($script:HS -and $script:HS.hosting) { $Icons.ok } elseif ($script:HS -and $script:HS.phase -in 'error', 'lost') { $Icons.bad } else { $Icons.wait }) }
+    if (-not $syncing) {
+      $line = Get-HostLine $script:HS; $miStatus.Text = $line
+      $other = $script:HS -and $script:HS.remote -and $script:HS.remote.state -eq 'hosted'
+      $ic = $(if (($script:HS -and $script:HS.hosting) -or $other) { $Icons.ok } elseif ($script:HS -and $script:HS.phase -in 'error', 'lost') { $Icons.bad } else { $Icons.wait })
+      if ($script:Tray.Icon -ne $ic) { $script:Tray.Icon = $ic }                 # only on a real change: the notification-area icon must not flicker
+      $tip = 'Blockhost - ' + ($line -replace '^Server:? ?', ''); if ($tip.Length -gt 63) { $tip = $tip.Substring(0, 60) + '...' }; $script:Tray.Text = $tip
+    }
   }
 })
 $timer.Start()
