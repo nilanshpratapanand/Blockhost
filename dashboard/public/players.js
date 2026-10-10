@@ -294,6 +294,7 @@
         const addable = tab !== 'known';
         $('#plLists').innerHTML = `
           <div class="tabs">${TABS.map(([k, l]) => `<button class="${tab === k ? 'on' : ''}" data-t="${k}">${l}<span class="count">${(lists[k] || []).length}</span></button>`).join('')}</div>
+          ${tab === 'ops' ? `<div class="muted small" style="margin-bottom:12px">${ic('shield')} <b>Op Guard is on.</b> Operators last for one session only: grant op while the player is online, and it is removed when they leave or the server stops. This stops strangers from joining as an operator's name on this offline-mode server.</div>` : ''}
           ${tab === 'whitelist' ? `<div class="row between" style="margin-bottom:14px"><div><b>Whitelist is ${S.snap.whitelist ? 'ON' : 'OFF'}</b><div class="muted small">${S.snap.whitelist ? 'Only players on this list can join.' : 'Anyone with the address can join.'}</div></div><label class="switch"><input type="checkbox" id="wlToggle" ${S.snap.whitelist ? 'checked' : ''}><span></span></label></div>` : ''}
           ${addable ? `<form class="input-group" id="lAdd" style="margin-bottom:10px"><input class="input" id="lName" placeholder="${tab === 'ipbans' ? 'IP address' : 'Player name'}" autocomplete="off">${tab === 'bans' || tab === 'ipbans' ? '<input class="input" id="lReason" placeholder="Reason (optional)">' : ''}<button class="btn btn-primary">${ic('plus')}Add</button></form>` : ''}
           <div class="list">${L.length ? L.map(e => {

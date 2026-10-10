@@ -174,7 +174,7 @@ class MinecraftServer extends EventEmitter {
   }
 
   removePlayer(name) {
-    if (this.players.delete(name)) { this.onlineCount = this.players.size; this.emit('players', this.playerList()); }
+    if (this.players.delete(name)) { this.onlineCount = this.players.size; this.emit('players', this.playerList()); this.emit('leave', name); }
   }
 
   syncPlayers(list) {

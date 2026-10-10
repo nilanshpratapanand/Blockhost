@@ -27,6 +27,7 @@ const { SyncHost } = require('./lib/sync');
 const { buildSyncBat, agentScript } = require('./lib/syncagent');
 const { FrontDoor } = require('./lib/frontdoor');
 const { FastLane } = require('./lib/fastlane');
+const { OpGuard } = require('./lib/opguard');
 const { mergePacks } = require('./lib/rpmerge');
 const mcclient = require('./lib/mcclient');
 
@@ -45,6 +46,8 @@ const DEFAULT_CONFIG = {
   javaPath: '',
   autoRestart: true,
   autoStartServer: false,
+  opGuard: true,            // operators are session-only (see lib/opguard.js)
+  opGuardNames: [],
   checkUpdatesOnLaunch: true,
   backupsToKeep: 10,
   autoBackupMinutes: 0,
@@ -121,7 +124,12 @@ const front = new FrontDoor({
   log: m => mc.log(m, 'dash'),
   framed: resId => sync.framed(resId),
 });
+const opGuard = new OpGuard({ dir: SERVER_DIR, getConfig: () => config, saveConfig, send: c => { try { mc.send(c); } catch { /* offline */ } }, log: (m, l) => mc.log(m, l) });
+mc.on('join', n => opGuard.onJoin(n));
+mc.on('leave', n => opGuard.onLeave(n));
+mc.on('state', s => { if (s.state === 'offline' || s.state === 'crashed') opGuard.onStop(); });
 mc.beforeStart = async () => {
+  opGuard.scrub();                       // never start with permanent name-based operators
   await packs.processPendingDeletes();   // data packs removed while the server had them open
   if (config.serverPackAuto && config.serverPackAuto.via === 'fast') {   // the fast-lane address changes per run
     if (!fast.url && fast.wanted) await fast.waitUrl(20000);
@@ -394,6 +402,7 @@ async function listAction(list, action, name, reason) {
   name = String(name || '').trim();
   if (!name) throw new Error('Name required');
   if (!/^[\w.\-<>:]{1,40}$/.test(name)) throw new Error('Invalid name/IP');
+  if (list === 'ops' && action === 'add') opGuard.grant(name, mc.isRunning() && mc.state === 'online' && mc.players.has(name));
   const file = path.join(SERVER_DIR, LIST_FILES[list]);
   const keyField = list === 'ipbans' ? 'ip' : 'name';
   const inFile = () => U.readJSONFile(file, []).some(e => String(e[keyField]).toLowerCase() === name.toLowerCase());
@@ -1131,6 +1140,7 @@ server.listen(config.port, '127.0.0.1', async () => {
   if (config.fastLane && config.syncEnabled) fast.start();
   if (sharedActive() && !mc.isRunning()) { if (!(await front.start())) mc.log('Live Sync front door: ' + front.error, 'warn'); }
   sync.url().catch(() => {});
+  if (!mc.isRunning()) { try { opGuard.scrub(); } catch (e) { mc.log('Op Guard scrub failed: ' + e.message, 'warn'); } }   // e.g. server was last stopped via run.bat
   if (config.autoStartServer) mc.start().catch(e => mc.log('Auto-start failed: ' + e.message, 'error'));
 });
 
