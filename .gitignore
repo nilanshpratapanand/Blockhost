@@ -1,0 +1,34 @@
+# --- Secrets: never commit ---
+dashboard/config.json
+dashboard/sync-key.pem
+*.pem
+*.key
+Blockhost-Sync-*.bat
+dashboard/sync-clients.json
+dashboard/seen-players.json
+
+# --- Minecraft server data (lives next to the dashboard, not in this repo) ---
+server.properties
+ops.json
+whitelist.json
+banned-*.json
+usercache.json
+eula.txt
+world*/
+logs/
+crash-reports/
+backups/
+libraries/
+versions/
+*.jar
+run.bat
+
+# --- Dashboard runtime / generated ---
+dashboard/bin/
+dashboard/server-pack/
+dashboard/player-kit/
+dashboard/*.log
+Install-*-packs.zip
+cloudflared.exe
+node_modules/
+.env

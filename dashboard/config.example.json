@@ -1,0 +1,12 @@
+{
+  "port": 8765,
+  "minRam": "4G",
+  "maxRam": "4G",
+  "autoRestart": true,
+  "backupsToKeep": 10,
+  "useManagementApi": true,
+  "rpcPort": 25585,
+  "curseforgeKey": "",
+  "syncEnabled": false,
+  "syncToken": ""
+}
