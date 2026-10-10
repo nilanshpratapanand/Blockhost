@@ -20,8 +20,9 @@ function parseSecret(text) {
   return m ? m[1] : '';
 }
 function playitKeyCandidates({ serverDir, dashDir } = {}) {
-  const la = process.env.LOCALAPPDATA || '', ad = process.env.APPDATA || '', home = os.homedir();
+  const la = process.env.LOCALAPPDATA || '', ad = process.env.APPDATA || '', pd = process.env.ProgramData || (process.platform === 'win32' ? 'C:\\ProgramData' : ''), home = os.homedir();
   return [
+    pd && path.join(pd, 'playit_gg', 'playit.toml'),          // the Windows service install keeps it here
     la && path.join(la, 'playit_gg', 'playit.toml'), ad && path.join(ad, 'playit_gg', 'playit.toml'),
     serverDir && path.join(serverDir, 'playit.toml'), dashDir && path.join(dashDir, 'bin', 'playit.toml'),
     path.join(home, '.config', 'playit_gg', 'playit.toml'),
