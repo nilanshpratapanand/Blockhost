@@ -14,11 +14,11 @@ const ENV = { WRANGLER_SEND_METRICS: 'false', WRANGLER_SEND_ERROR_REPORTS: 'fals
 const stripAnsi = s => String(s || '').replace(/\u001b\[[0-9;?]*[A-Za-z]/g, '').replace(/\r/g, '');
 
 /** Run a command, collect output, call onLine for each line. Resolves {code, out}. */
-function run(cmd, args, { cwd, env, timeoutMs = 180000, onLine } = {}) {
+function run(cmd, args, { cwd, env, timeoutMs = 180000, onLine, input } = {}) {
   return new Promise(resolve => {
     let out = '', done = false, buf = '';
     let p;
-    try { p = spawn(cmd, args, { cwd, env: { ...process.env, ...ENV, ...(env || {}) }, shell: IS_WIN, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }); }
+    try { p = spawn(cmd, args, { cwd, env: { ...process.env, ...ENV, ...(env || {}) }, shell: IS_WIN, windowsHide: true, stdio: [input != null ? 'pipe' : 'ignore', 'pipe', 'pipe'] }); if (input != null) { p.stdin.on('error', () => {}); p.stdin.end(String(input)); } }
     catch (e) { return resolve({ code: -1, out: String(e.message) }); }
     const finish = (code, extra) => { if (done) return; done = true; clearTimeout(t); resolve({ code, out: stripAnsi(out + (extra || '')) }); };
     const t = setTimeout(() => { try { p.kill(); } catch { /* gone */ } finish(-2, '\n[timed out]'); }, timeoutMs);
@@ -104,12 +104,27 @@ async function setup(opts) {
 
   log('Waiting for it to come online...', 80);
   const f = opts.fetch || fetch;
-  let ok = false, last = '';
-  for (let i = 0; i < 20 && !ok; i++) {
-    try { const r = await f(`${url}/?k=${encodeURIComponent(secret)}`); if (r.status === 200) ok = true; else last = 'HTTP ' + r.status; } catch (e) { last = e.message; }
-    if (!ok) await sleep(2000);
+  // probe the exact request Blockhost makes later (not just a web page), so "ready" really means ready
+  const probe = async () => {
+    try {
+      const r = await f(`${url}/v1/lease`, { method: 'POST', headers: { authorization: 'Bearer ' + secret, 'content-type': 'application/json' }, body: JSON.stringify({ op: 'status' }) });
+      if (r.status === 200) { const j = await r.json().catch(() => null); return j && j.state ? 'ok' : 'HTTP 200 but not the coordinator'; }
+      return 'HTTP ' + r.status;
+    } catch (e) { return e.message; }
+  };
+  let last = '', ok = false, fixed = false, good = 0;
+  for (let i = 0; i < 40 && !ok; i++) {
+    last = await probe();
+    if (last === 'ok') { if (++good >= 3) { ok = true; break; } await sleep(1000); continue; }   // 3 answers in a row: all Cloudflare servers agree
+    good = 0;
+    if (last === 'HTTP 401' && i === 8 && !fixed) {                 // the secret did not arrive with the deploy: set it directly instead
+      fixed = true; log('Setting the group secret directly...', 82);
+      const sp = await wr(['secret', 'put', 'GROUP_SECRET', '--config', 'wrangler.toml'], { env, input: secret + '\n', timeoutMs: 120000 });
+      if (sp.code !== 0) throw fail(explain(sp.out), sp.out);
+    }
+    await sleep(2000);
   }
-  if (!ok) throw fail({ code: 'WAIT', message: `Deployed to ${url} but it did not answer yet (${last}). Wait a minute and press "Test connection".` });
+  if (!ok) throw fail({ code: 'WAIT', message: `Deployed to ${url} but it is not answering correctly yet (${last}). Wait a minute and press the button again - it reuses the same Cloudflare setup.` });
   return { url, secret, account };
 }
 

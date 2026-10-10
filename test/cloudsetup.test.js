@@ -41,7 +41,7 @@ function fakeRun({ loggedIn = true, deployOut = DEPLOY, deployCode = 0 } = {}) {
   };
   return { run, calls };
 }
-const okFetch = async () => ({ status: 200 });
+const okFetch = async () => ({ status: 200, json: async () => ({ state: 'free' }) });
 const noSleep = async () => {};
 
 test('setup: already logged in -> deploys with a fresh secret file, returns url and secret', async () => {
@@ -71,6 +71,18 @@ test('setup: deploy failure carries a readable code', async () => {
 });
 test('setup: waits until the worker answers', async () => {
   let n = 0; const f = fakeRun();
-  const r = await setup({ cloudDir: '/x', run: f.run, sleep: noSleep, fetch: async () => ({ status: ++n < 3 ? 404 : 200 }) });
-  assert.ok(r.url && n === 3);
+  const r = await setup({ cloudDir: '/x', run: f.run, sleep: noSleep, fetch: async () => ({ status: ++n < 3 ? 404 : 200, json: async () => ({ state: 'free' }) }) });
+  assert.ok(r.url && n === 5);
+});
+
+test('setup: if the secret never arrives with the deploy, it is set directly and verified', async () => {
+  const f = fakeRun(); let secretSet = null, n = 0;
+  const run = async (c, a, o) => { if (a.includes('secret')) { secretSet = o.input.trim(); return { code: 0, out: 'Success' }; } return f.run(c, a, o); };
+  const fetchSecret = async (u, i) => { n++; return secretSet && i.headers.authorization === 'Bearer ' + secretSet ? { status: 200, json: async () => ({ state: 'free' }) } : { status: 401, json: async () => ({}) }; };
+  const r = await setup({ cloudDir: '/x', run, fetch: fetchSecret, sleep: noSleep });
+  assert.strictEqual(secretSet, r.secret);
+});
+test('setup: a 200 page that is not the coordinator is not accepted', async () => {
+  const f = fakeRun();
+  await assert.rejects(setup({ cloudDir: '/x', run: f.run, sleep: noSleep, fetch: async () => ({ status: 200, json: async () => ({}) }) }), e => e.code === 'WAIT');
 });
